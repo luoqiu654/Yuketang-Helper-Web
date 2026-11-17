@@ -53,7 +53,7 @@
     "fallbackKeysDesc": "When the active key fails, try other keys in order",
     "answerNearDeadline": "Answer Near Deadline",
     "answerNearDeadlineTable": {
-      "title": "Submission timing: 8 combinations",
+      "title": "Answering in this version",
       "headerMode": "Mode",
       "headerNearDeadline": "Near deadline",
       "headerLimit": "Deadline",
@@ -64,14 +64,14 @@
       "stateOff": "Off",
       "limitYes": "Yes",
       "limitNo": "No",
-      "aiOnLimited": "Wait for AI until 10–15s before the deadline; submit a random/blank fallback if AI hasn't returned by then. Nothing is submitted if you've already answered by hand",
-      "aiOnUnlimited": "Wait up to 45s for AI and submit on return; fall back to random/blank if it fails or times out",
-      "aiOffLimited": "Submit as soon as AI returns; wait up to 1s before the deadline, then submit a random/blank fallback",
-      "aiOffUnlimited": "Wait up to 45s for AI and submit on return; fall back to random/blank if it fails or times out",
-      "fallbackOnLimited": "Submit 10–15s before the deadline (random choice or blank text). Nothing is submitted if you've already answered by hand",
-      "fallbackOnUnlimited": "Submit immediately (random choice or blank text)",
-      "fallbackOffLimited": "Submit immediately (random choice or blank text)",
-      "fallbackOffUnlimited": "Submit immediately (random choice or blank text)"
+      "aiOnLimited": "This version does not submit automatically. Answer in Yuketang.",
+      "aiOnUnlimited": "This version does not submit automatically. Answer in Yuketang.",
+      "aiOffLimited": "This version does not submit automatically. Answer in Yuketang.",
+      "aiOffUnlimited": "This version does not submit automatically. Answer in Yuketang.",
+      "fallbackOnLimited": "This version does not submit automatically. Answer in Yuketang.",
+      "fallbackOnUnlimited": "This version does not submit automatically. Answer in Yuketang.",
+      "fallbackOffLimited": "This version does not submit automatically. Answer in Yuketang.",
+      "fallbackOffUnlimited": "This version does not submit automatically. Answer in Yuketang."
     },
     "danmuThreshold": "Send when repeated",
     "times": "times",
@@ -99,7 +99,9 @@
     "monitorSettings": "Monitor Settings",
     "pollInterval": "Poll Interval",
     "pollIntervalDesc": "How often to check Yuketang for active lessons. Allowed: {{min}}–{{max}}s (default {{default}}s). Lower = faster lesson detection but more API requests.",
-    "seconds": "seconds"
+    "seconds": "seconds",
+    "aiSuggestConfirm": "AI suggestion and confirmation (in development)",
+    "notifyOnly": "Notify only"
   },
   "speech": {
     "signin": "{{lesson}} checked in",
@@ -142,7 +144,7 @@
     "source_blank": "blank",
     "answer": "answer(s)",
     "reason": "Reason",
-    "ai_failed": "AI answering failed, please answer manually! A random (choice) or blank (short-answer) fallback will be submitted per the \"Answer Near Deadline\" setting",
+    "ai_failed": "AI suggestion failed. Please answer in Yuketang.",
     "skip_off": "Skipped: this question type is turned off, please answer manually",
     "skip_unsupported": "Skipped: this question type isn't supported yet, please answer manually",
     "skip_answered": "Skipped: you already answered it yourself",
@@ -152,6 +154,6 @@
     "loading": "Loading...",
     "delete": "Delete",
     "unknown": "Unknown",
-    "betaWarning": "AI answer accuracy is not guaranteed. If no key is configured, random answering is used as fallback."
+    "betaWarning": "AI suggestions may be inaccurate. Review answers; this version does not submit automatically."
   }
 }

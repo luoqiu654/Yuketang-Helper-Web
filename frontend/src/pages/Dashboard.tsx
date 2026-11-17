@@ -4,6 +4,8 @@ import type { TFunction } from 'i18next'
 import type { CourseItem, NotificationSub } from '../types'
 import { useAccounts } from '../hooks/useAccounts'
 import MiddleTruncate from '../components/MiddleTruncate'
+import HealthPanel from '../components/monitor/HealthPanel'
+import QuizReview from '../components/quiz/QuizReview'
 
 interface ActiveLesson {
   lessonid: number
@@ -135,6 +137,7 @@ export default function Dashboard() {
   const accountId = activeAccount?.id ?? null
   const [allCourses, setAllCourses] = useState<CourseItem[]>([])
   const [events, setEvents] = useState<ActivityEvent[]>([])
+  const [browserConnected, setBrowserConnected] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
 
   const eventCounter = useRef(0)
@@ -237,6 +240,7 @@ export default function Dashboard() {
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
       ws = new WebSocket(`${protocol}://${window.location.host}/ws/accounts/${accountId}/events`)
 
+      ws.onopen = () => setBrowserConnected(true)
       ws.onmessage = (ev) => {
         let msg: Record<string, unknown>
         try {
@@ -246,6 +250,10 @@ export default function Dashboard() {
         }
         const type = msg['type'] as string
         if (type === 'heartbeat') return
+        if (type === 'monitor_health_snapshot' || type === 'monitor_health_changed') {
+          window.dispatchEvent(new Event('yuketang-monitor-health'))
+          return
+        }
 
         if (type === 'history') {
           const raw = (msg['events'] as Record<string, unknown>[]) ?? []
@@ -284,6 +292,7 @@ export default function Dashboard() {
       }
 
       ws.onclose = () => {
+        setBrowserConnected(false)
         if (!unmounted) {
           reconnectTimer = setTimeout(connect, 3000)
         }
@@ -305,6 +314,8 @@ export default function Dashboard() {
 
   return (
     <div className="page">
+      {accountId && <HealthPanel accountId={accountId} browserConnected={browserConnected} />}
+      {accountId && <QuizReview accountId={accountId} />}
       <section className="card">
         <h2 className="card-title">{t('dashboard.allCourses')}</h2>
         {allCourses.length === 0 ? (

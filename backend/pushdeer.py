@@ -134,15 +134,15 @@ def _send(endpoint: str, push_key: str, title: str, body: str) -> tuple[bool, st
         # PushDeer expects form-encoded body.
         r = http_request("POST", url, attempts=2, timeout=10, data=payload)
         result = r.json()
-    except Exception as e:
-        logger.warning(f"PushDeer send failed: {e}")
-        return False, str(e)
+    except Exception:
+        # Provider exceptions can include URLs or credentials; do not expose them.
+        logger.warning("PushDeer request failed")
+        return False, "PushDeer request failed"
 
     if result.get("code") == 0:
         return True, "ok"
-    err = result.get("error") or result.get("content") or str(result)
-    logger.warning(f"PushDeer API error: {err}")
-    return False, str(err)
+    logger.warning("PushDeer API rejected the request")
+    return False, "PushDeer API rejected the request"
 
 
 # ---------------------------------------------------------------------------
@@ -235,8 +235,8 @@ def send_liveness(account_id: str, entry: dict | None = None) -> tuple[bool, str
     language = pd_cfg["language"]
     if language == "en":
         label = "Heartbeat"
-        body = "If you see this message, PushDeer and Yuketang Helper are running normally and this account's session has not expired."
+        body = "PushDeer accepted this test message. A session is stored locally; its server-side validity has not been checked."
     else:
         label = "心跳"
-        body = "当你看到这条消息，说明 PushDeer 和雨课堂助手正常运行且该账号 session 未过期。"
+        body = "PushDeer 已接收这条测试消息。本地保存了登录信息，但本次测试未验证其服务端有效性。"
     return _send(*creds, _title(language, label, account_id), body)

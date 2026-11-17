@@ -32,8 +32,9 @@ URL_COURSE_LIST = "https://{domain}/v2/api/web/courses/list?identity=2"
 
 def handle_session_expired(account_id: str) -> None:
     """Called by Monitor when its poll detects an expired sessionid."""
-    update_account(account_id, {"sessionid": "", "user": {}, "course_list": []})
-    state.set_monitor(account_id, None)
+    # Preserve cached identity and course information. Keep the stopped monitor
+    # registered so the health endpoint can report SESSION_EXPIRED until login.
+    update_account(account_id, {"sessionid": ""})
 
 
 def start_monitor(account_id: str) -> None:

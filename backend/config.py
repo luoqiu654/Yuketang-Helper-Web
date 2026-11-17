@@ -1,4 +1,6 @@
 import json
+import copy
+import shutil
 import logging
 import os
 import sys
@@ -53,8 +55,8 @@ MIN_POLL_INTERVAL = 10
 MAX_POLL_INTERVAL = 3600
 DEFAULT_POLL_INTERVAL = 30
 
-ChoiceAnswerMode = Literal["ai", "random", "off"]
-ShortAnswerMode = Literal["ai", "blank", "off"]
+ChoiceAnswerMode = Literal["notify_only", "ai_suggest_confirm"]
+ShortAnswerMode = ChoiceAnswerMode
 PushdeerLanguage = Literal["zh", "en"]
 AIProviderName = Literal["google", "qwen"]
 
@@ -80,11 +82,11 @@ class NotificationSubModel(BaseModel):
 
 
 class CourseSettingsModel(BaseModel):
-    type1: ChoiceAnswerMode = "ai"
-    type2: ChoiceAnswerMode = "ai"
-    type3: ChoiceAnswerMode = "ai"
+    type1: ChoiceAnswerMode = "notify_only"
+    type2: ChoiceAnswerMode = "notify_only"
+    type3: ChoiceAnswerMode = "notify_only"
     type4: Literal["off"] = "off"
-    type5: ShortAnswerMode = "ai"
+    type5: ShortAnswerMode = "notify_only"
     course_enabled: bool = True
     # Hold submissions until shortly before the deadline. Off by default; a
     # teacher closing a problem early would otherwise leave it unanswered.
@@ -140,6 +142,7 @@ class AccountModel(DomainModel):
 
 
 class ConfigModel(BaseModel):
+    schema_version: Literal[2] = 2
     active_account_id: str | None = None
     accounts: dict[str, AccountModel] = Field(default_factory=dict)
 
@@ -165,9 +168,21 @@ def set_poll_interval(account_id: str, seconds: int) -> int:
 config_lock = threading.RLock()
 
 
+def _protect_ai_keys(cfg: dict) -> dict:
+    from credentials import store
+    protected = copy.deepcopy(cfg)
+    for account in protected.get("accounts", {}).values():
+        for key in account.get("ai", {}).get("keys", []):
+            secret = key.get("key", "")
+            if secret and not secret.startswith("vault:"):
+                key["key"] = store(_CONFIG_PATH.with_name("credentials.sqlite3"), secret)
+    return protected
+
+
 def _write_config(cfg: dict) -> None:
     # Atomic write: dump to *.tmp then os.replace so concurrent readers never
     # see a half-written file. Caller must hold config_lock.
+    cfg = _protect_ai_keys(cfg)
     tmp_path = _CONFIG_PATH.with_suffix(".json.tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -189,22 +204,53 @@ def _backup_invalid_config() -> Path | None:
         return None
 
 
+def _migrate_config(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise ValueError("Config must be an object")
+    version = raw.get("schema_version", 1)
+    if version == 2:
+        return raw
+    if version != 1:
+        raise ValueError("Unsupported config schema version")
+    migrated = copy.deepcopy(raw)
+    mapping = {"ai": "ai_suggest_confirm", "off": "notify_only",
+               "random": "notify_only", "blank": "notify_only"}
+    for account in migrated.get("accounts", {}).values():
+        for course in account.get("courses", {}).values():
+            for key in ("type1", "type2", "type3", "type5"):
+                if key in course:
+                    if course[key] not in mapping:
+                        raise ValueError("Unknown legacy answer mode")
+                    course[key] = mapping[course[key]]
+    migrated["schema_version"] = 2
+    return migrated
+
+
 def get_config() -> dict:
     with config_lock:
         try:
             with open(_CONFIG_PATH, encoding="utf-8") as f:
                 raw = json.load(f)
-            return ConfigModel.model_validate(raw).model_dump()
         except FileNotFoundError:
-            pass
-        except (json.JSONDecodeError, OSError, ValidationError) as e:
-            backup = _backup_invalid_config()
-            logger.warning(
-                f"Config invalid ({e}); backed up to {backup or '<none>'} and resetting to empty"
-            )
-        fresh = ConfigModel().model_dump()
-        _write_config(fresh)
-        return fresh
+            fresh = ConfigModel().model_dump()
+            _write_config(fresh)
+            return fresh
+        # Fail closed: never reset or overwrite unparseable user data.
+        migrated = _migrate_config(raw)
+        validated = ConfigModel.model_validate(migrated).model_dump()
+        needs_schema = raw.get("schema_version", 1) != 2
+        needs_vault = any(key.get("key") and not key["key"].startswith("vault:")
+                          for account in validated.get("accounts", {}).values()
+                          for key in account.get("ai", {}).get("keys", []))
+        if needs_schema or needs_vault:
+            backup = _CONFIG_PATH.with_name("config.pre-v2.json" if needs_schema else "config.pre-vault.json")
+            if backup.exists():
+                raise RuntimeError("Migration backup already exists; resolve it before retrying")
+            shutil.copy2(_CONFIG_PATH, backup)
+            _write_config(validated)
+            with open(_CONFIG_PATH, encoding="utf-8") as f:
+                validated = ConfigModel.model_validate(json.load(f)).model_dump()
+        return validated
 
 
 def save_config(cfg: dict) -> None:
@@ -336,7 +382,12 @@ def update_course_config(account_id: str, course_id: str, data: dict) -> None:
 
 def get_ai_config(account_id: str) -> dict:
     acc = get_account(account_id)
-    return acc["ai"] if acc else AIModel().model_dump()
+    result = copy.deepcopy(acc["ai"]) if acc else AIModel().model_dump()
+    from credentials import load
+    for key in result["keys"]:
+        if key["key"].startswith("vault:"):
+            key["key"] = load(_CONFIG_PATH.with_name("credentials.sqlite3"), key["key"])
+    return result
 
 
 def update_ai_config(account_id: str, data: dict) -> None:

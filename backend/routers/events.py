@@ -22,6 +22,9 @@ async def ws_events(ws: WebSocket, account_id: str):
         state.subscribers.setdefault(account_id, set()).add(client_queue)
 
     try:
+        monitor = state.get_monitor(account_id)
+        snapshot = monitor.health() if monitor else {"account_id": account_id, "state": "STOPPED", "lessons": [], "last_poll_success_at": None}
+        await ws.send_json({"type": "monitor_health_snapshot", "account_id": account_id, "health": snapshot})
         history = event_log.load_recent(account_id, 50)
         if history:
             await ws.send_json({"type": "history", "events": history})

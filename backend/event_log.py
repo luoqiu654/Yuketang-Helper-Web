@@ -9,6 +9,7 @@ import threading
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from config import STORE_DIR
 
@@ -27,6 +28,7 @@ _LOG_DIR.mkdir(parents=True, exist_ok=True)
 _locks: dict[str, threading.Lock] = {}
 _registry_lock = threading.Lock()
 _append_counts: dict[str, int] = {}
+_event_sequences: dict[str, int] = {}
 
 
 def _lock_for(account_id: str) -> threading.Lock:
@@ -41,12 +43,26 @@ def _path(account_id: str) -> Path:
     return _LOG_DIR / f"{account_id}.jsonl"
 
 
-def append(account_id: str, event: dict) -> None:
+def append(account_id: str, event: dict) -> dict:
     # With the UTC offset, so a browser in another timezone than this process
     # (Docker runs in UTC) still shows the event at the right local time.
-    record = {"logged_at": datetime.now().astimezone().isoformat(timespec="seconds"), **event}
     p = _path(account_id)
     with _lock_for(account_id):
+        if account_id not in _event_sequences:
+            sequence = 0
+            if p.exists():
+                with open(p, encoding="utf-8") as existing:
+                    for line in existing:
+                        try:
+                            sequence = max(sequence, int(json.loads(line).get("event_seq", 0)))
+                        except (ValueError, TypeError, json.JSONDecodeError):
+                            continue
+            _event_sequences[account_id] = sequence
+        _event_sequences[account_id] += 1
+        now = datetime.now().astimezone().isoformat(timespec="milliseconds")
+        record = {**event, "account_id": account_id, "logged_at": now,
+                  "occurred_at": now, "event_id": str(uuid4()),
+                  "event_seq": _event_sequences[account_id]}
         with open(p, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
         count = _append_counts.get(account_id, 0) + 1
@@ -55,6 +71,7 @@ def append(account_id: str, event: dict) -> None:
             _trim(p)
         else:
             _append_counts[account_id] = count
+    return record
 
 
 def load_recent(account_id: str, n: int = 50) -> list:
@@ -72,6 +89,7 @@ def clear(account_id: str) -> None:
     with _lock_for(account_id):
         p.unlink(missing_ok=True)
         _append_counts.pop(account_id, None)
+        _event_sequences.pop(account_id, None)
     with _registry_lock:
         _locks.pop(account_id, None)
 

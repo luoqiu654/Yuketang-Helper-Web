@@ -3,14 +3,14 @@ import logging
 import random
 import threading
 import time
+from datetime import datetime, timezone
 from enum import Enum, auto
 from collections.abc import Callable, Iterable
 from typing import Any, NamedTuple
 
 import websocket
 
-from ai_provider import create_provider
-from config import api_url, get_account, get_ai_config, http_request, make_headers, ws_direct
+from config import api_url, get_account, http_request, make_headers, ws_direct
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,9 @@ _DEADLINE_LEAD = (10.0, 15.0)
 # lesson token from check-in is reused on every reconnect, and if Yuketang
 # stops accepting it we would reconnect forever without seeing a problem.
 _SILENT_CONNECTIONS_WARN = 3
+# Short-lived connections are failures even if they deliver a greeting frame.
+# Normal server-initiated reconnects are usually much longer lived.
+_STABLE_WS_SECONDS = 30.0
 # Rejected submissions before we stop retrying a problem. Transient errors
 # clear in a try or two; retrying forever would hammer Yuketang on every frame.
 _MAX_SUBMIT_FAILS = 3
@@ -101,6 +104,7 @@ class Lesson:
         # forward: a frame's `dt` is at or before the server's "now", and
         # underestimating the time left is the safe direction.
         self._server_offset = 0.0
+        self.ws_health = {"state": "CONNECTING", "last_connected_at": None, "last_frame_at": None, "reconnect_count": 0, "consecutive_failures": 0}
         self._frames = 0  # frames received on the current connection
 
         self.user_uid: int | None = None
@@ -130,9 +134,10 @@ class Lesson:
         # tracked but unattended.
         self._checkin()
 
-        # Yuketang closes the WS every ~40-60s while class is still live.
-        # Reconnect on a fixed 1s delay until external stop or `lessonfinished`.
+        # Normal, long-lived server disconnects get a fast reconnect. Repeated
+        # short connections back off even if each one delivered a hello frame.
         silent = 0
+        failures = 0
         while self._is_running():
             self._frames = 0
             self.wsapp = websocket.WebSocketApp(
@@ -141,17 +146,30 @@ class Lesson:
                 on_open=self._on_open,
                 on_message=self._on_message,
             )
-            self.wsapp.run_forever(ping_interval=30, ping_timeout=10, **ws_direct(self.domain))
+            started = time.monotonic()
+            try:
+                self.wsapp.run_forever(ping_interval=30, ping_timeout=10, **ws_direct(self.domain))
+            except Exception:
+                # Do not log socket exception text: it may contain credentials.
+                self.ws_health.update(last_error_code="WS_ERROR", last_error_at=datetime.now(timezone.utc).isoformat())
+                logger.warning("[%s] classroom WebSocket failed", self.account_id)
             if not self._is_running():
                 break
+            self.ws_health["state"] = "RECOVERING"
+            self.ws_health["reconnect_count"] += 1
             silent = silent + 1 if self._frames == 0 else 0
+            failures = failures + 1 if time.monotonic() - started < _STABLE_WS_SECONDS else 0
+            self.ws_health["consecutive_failures"] = failures
+            self.on_event("monitor_health_changed", {"classroom_health": {"lesson_id": self.lessonid, **self.ws_health}})
             if silent >= _SILENT_CONNECTIONS_WARN:
                 logger.warning(
                     f"[{self.account_id}][WS {self.lessonname}] {silent} connections in a row delivered "
                     f"no frames; the lesson token may no longer be accepted"
                 )
-            logger.info(f"[{self.account_id}][WS {self.lessonname}] disconnected, reconnecting in 1s")
-            time.sleep(1)
+            delay = min(30.0, 2 ** min(max(failures - 1, 0), 5))
+            delay *= random.uniform(0.8, 1.0)
+            logger.info(f"[{self.account_id}][WS {self.lessonname}] disconnected, retrying in {delay:.1f}s")
+            self._stop_event.wait(delay)
 
         # Monitor._sync_lessons already emits lesson_end on external stop,
         # so only emit it here when we exited because the lesson finished.
@@ -346,20 +364,46 @@ class Lesson:
         problemid = problem["problemId"]
         if problem.get("result") is not None:
             # Answered already (by us on a previous run, or by hand elsewhere).
+            from quiz.store import mark_answered
+            mark_answered(self.account_id, self.lessonid, problemid)
             self._claim(problemid)
             return
-        reason = self._skip_reason(problem)
-        if reason:
-            self._notify_skipped(problem, reason)
-            return
-        if not self._claim(problemid):
-            return
-        threading.Thread(
-            target=self._answer_problem,
-            args=(problem, limit),
-            daemon=True,
-            name=f"answer-{self.lessonid}-{problemid}",
-        ).start()
+        from quiz import store
+        try:
+            if store.create(self.account_id, self, problem):
+                self.on_event("problem_received", {"lesson": self.lessonname,
+                    "lessonid": self.lessonid, "problemid": problemid})
+                if self._mode_for(problem) == "ai_suggest_confirm":
+                    record = store.get_by_problem(self.account_id, self.lessonid, problemid)
+                    if record and store.transition(self.account_id, record['id'], ('NEEDS_MANUAL',), 'SUGGESTING'):
+                        threading.Thread(target=self._suggest_problem, args=(record['id'], dict(problem)), daemon=True).start()
+        except Exception:
+            logger.exception("Could not persist quiz; submission remains disabled")
+            # Notifications remain available even if the local quiz database fails.
+            if problemid not in self._skip_notified:
+                self._skip_notified.add(problemid)
+                self.on_event("problem_received", {"lesson": self.lessonname,
+                    "lessonid": self.lessonid, "problemid": problemid})
+
+    def _suggest_problem(self, quiz_id: str, problem: dict) -> None:
+        from quiz import store
+        from quiz.validation import validate_answer
+        try:
+            from ai_gateway import suggest
+            result = suggest(self.account_id, problem)
+            answer = validate_answer(problem, result['answer'])
+            changed = store.transition(self.account_id, quiz_id, ('SUGGESTING',), 'AWAITING_CONFIRMATION', {
+                'suggested_answer': answer, 'model_id': result.get('model_id'),
+                'provider_id': result.get('provider_id'), 'latency_ms': result.get('latency_ms'),
+                'error_code': None})
+            if changed:
+                self.on_event('quiz_suggestion_ready', {'lesson': self.lessonname, 'lessonid': self.lessonid, 'problemid': problem['problemId']})
+        except Exception as exc:
+            code = getattr(exc, 'code', 'AI_UNAVAILABLE')
+            if not isinstance(code, str) or not code.replace('_', '').isalnum():
+                code = 'AI_UNAVAILABLE'
+            if store.transition(self.account_id, quiz_id, ('SUGGESTING',), 'NEEDS_MANUAL', {'error_code': code}):
+                self._emit_ai_failed(problem['problemId'], problem['problemType'], code)
 
     def _reconcile_unlocked(self, data: dict) -> None:
         """Answer anything the server reports as unlocked that we haven't.
@@ -376,11 +420,6 @@ class Lesson:
                 with self._answered_lock:
                     if problem["problemId"] in self._answered:
                         continue
-                reason = self._skip_reason(problem)
-                if reason:
-                    if problem.get("result") is None:
-                        self._notify_skipped(problem, reason)
-                    continue
             # Unknown, or known-but-unanswered: re-read from the server so we
             # act on a fresh `result` and pick up problems we never fetched.
             self._load_presentations([(problem or {}).get("_pres") or data.get("presentation")])
@@ -397,264 +436,18 @@ class Lesson:
     # Answer building
     # ------------------------------------------------------------------
 
-    def _max_option_count(self, problem: dict, problemtype: int, option_count: int) -> int:
-        if problemtype == 1:
-            return 1
-        if problemtype == 2:
-            return option_count
-        if problemtype == 3:
-            return max(1, min(int(problem.get("pollingCount") or 1), option_count))
-        raise ValueError(f"Unsupported option problem type: {problemtype}")
-
-    def _build_fallback_answer(
-        self, problem: dict, problemtype: int,
-    ) -> tuple[str | list[str], str]:
-        """Return (answer, source) for non-AI submission.
-        Short-answer (type 5) yields a single-space string with source='blank';
-        choice/vote types yield a randomly-sampled list with source='random'.
-        """
-        if problemtype == 5:
-            return " ", "blank"
-        if problemtype not in (1, 2, 3):
-            raise ValueError(f"Unsupported problem type for fallback: {problemtype}")
-        options = [opt["key"] for opt in problem.get("options", [])]
-        if not options:
-            raise ValueError("No options available for fallback answer")
-        count = random.randint(1, self._max_option_count(problem, problemtype, len(options)))
-        return random.sample(options, count), "random"
-
-    def _ai_keys_to_try(self) -> list[AIKeyAttempt]:
-        ai_cfg = get_ai_config(self.account_id)
-        keys = ai_cfg["keys"]
-        active = ai_cfg["active_key"]
-        fallback = ai_cfg["fallback_keys"]
-
-        if fallback:
-            ordered = []
-            if 0 <= active < len(keys):
-                ordered.append(keys[active])
-            ordered.extend(entry for i, entry in enumerate(keys) if i != active)
-        elif 0 <= active < len(keys):
-            ordered = [keys[active]]
-        else:
-            ordered = []
-
-        out: list[AIKeyAttempt] = []
-        for entry in ordered:
-            api_key = entry.get("key", "")
-            if not api_key:
-                continue
-            provider = entry.get("provider", "")
-            name = entry.get("name") or provider or "unnamed"
-            out.append(AIKeyAttempt(provider=provider, api_key=api_key, name=name))
-        return out
-
-    def _build_ai_answers(self, problem: dict, keys_to_try: list[AIKeyAttempt]) -> list | str:
-        if not keys_to_try:
-            raise RuntimeError("No AI provider available")
-
-        if not problem.get("_cover"):
-            # A presentation fetched while still rendering (`presentationcreated`
-            # arrives with `datacompleted: false`) can lack its slide images.
-            problem = self._refreshed(problem, timeout=4)
-        cover_url = problem.get("_cover", "")
-        if not cover_url:
-            # Providers read the question off the slide image; without one
-            # every key would fail, so go straight to the fallback answer.
-            raise RuntimeError("slide has no cover image")
-        problemtype = problem["problemType"]
-        last_error: Exception | None = None
-
-        for attempt in keys_to_try:
-            try:
-                provider = create_provider(attempt.provider, attempt.api_key)
-                if problemtype == 5:
-                    return provider.answer_short(cover_url)
-                option_keys = [opt["key"] for opt in problem["options"]]
-                max_count = self._max_option_count(problem, problemtype, len(option_keys))
-                return provider.answer_options(cover_url, option_keys, problemtype, max_count)
-            except Exception as e:
-                logger.warning(
-                    f"[{self.account_id}] AI call failed with key {attempt.name!r} ({attempt.provider}) "
-                    f"for cover {cover_url}, trying next: {e}"
-                )
-                last_error = e
-
-        raise RuntimeError(f"All AI providers failed: {last_error}") from last_error
-
-    # ------------------------------------------------------------------
-    # Answer submission
-    # ------------------------------------------------------------------
-    #
-    # Timing (see `_submit_window`), by mode and the `answer_near_deadline`
-    # toggle:
-    #   random/blank — near-deadline ON + deadline → submit `_DEADLINE_LEAD`
-    #                  seconds before the deadline; otherwise immediately.
-    #   ai           — near-deadline ON + deadline → wait for AI until that
-    #                  point, then submit whatever we have (AI or fallback);
-    #                  near-deadline OFF + deadline → submit as soon as AI
-    #                  returns, capped at `limit - 1s` so the fallback fits;
-    #                  no deadline → wait up to `_AI_MAX_WAIT`.
-    # A deadline shorter than `_DEADLINE_LEAD` is handled as near-deadline OFF.
-    # After any deliberate hold we re-read the problem first, so an answer the
-    # user gave by hand in the meantime is never replaced.
-
     def _submit_answer(self, problemid: Any, problemtype: int, real_answer: str | list[str], source: str) -> bool:
-        """POST one answer. Returns True once Yuketang accepts it; a False
-        return leaves the problem unclaimed so a later reconcile retries."""
-        if problemtype == 5:
-            payload_result = {"content": real_answer, "pics": [{"pic": "", "thumb": ""}]}
-        else:
-            payload_result = real_answer
-        payload = {
-            "problemId": problemid,
-            "problemType": problemtype,
-            "dt": int(time.time() * 1000),
-            "result": payload_result,
-        }
-        try:
-            r = http_request("POST", api_url(self.domain, URL_PROBLEM_ANSWER), headers=self.headers,
-                             json=payload, attempts=_ANSWER_ATTEMPTS, timeout=_ANSWER_TIMEOUT)
-            result = r.json()
-        except Exception as e:
-            logger.warning(f"[{self.account_id}] answer submit failed for problem {problemid}: {e}")
-            result = {"code": -1, "msg": str(e)}
-
-        ok = result.get("code") == 0
-        self.on_event("problem", {
-            "lesson": self.lessonname,
-            "lessonid": self.lessonid,
-            "problemid": problemid,
-            "problemtype": problemtype,
-            "answers": real_answer,
-            "source": source,
-            "status": "success" if ok else "error",
-            "message": result.get("msg", ""),
-        })
-        return ok
-
-    def _submit_window(self, limit: int, mode: str) -> tuple[float, float]:
-        """Compute ``(min_hold, max_wait)`` seconds, measured from problem receipt.
-
-        - ``min_hold`` — earliest submit time. Caller must hold this long
-          before submitting (so the near-deadline gate is honoured).
-        - ``max_wait`` — how long to wait for the AI response before falling
-          back. Non-AI modes ignore it.
-        """
-        if limit <= 0:
-            # No deadline known: submit immediately for fallback modes; AI mode
-            # waits for the provider, bounded so a hang can't eat the answer.
-            return (0.0, _AI_MAX_WAIT)
-        if self.course_config.get("answer_near_deadline", False):
-            target = limit - random.uniform(*_DEADLINE_LEAD)
-            if target > 0:
-                return (target, target)
-            # The deadline is closer than the lead: holding is pointless, and
-            # cutting the AI wait to zero would turn every answer into a guess.
-        if mode == "ai":
-            # Submit ASAP once AI returns; keep ~1s buffer for fallback.
-            return (0.0, max(0.5, float(limit - 1)))
-        # Non-AI + near-deadline off + has deadline: submit immediately.
-        return (0.0, 0.0)
-
-    def _answer_problem(self, problem: dict, limit: int) -> None:
-        """Answer thread body. Releases the claim if nothing was accepted, so
-        the next reconcile pass gets another go at it."""
-        problemid = problem["problemId"]
-        problemtype = problem["problemType"]
-        mode = self._mode_for(problem)
-        start_time = time.time()
-        submitted = False
-        try:
-            if mode == "ai":
-                submitted = self._answer_via_ai(problem, problemid, problemtype, limit, start_time)
-            else:
-                submitted = self._submit_fallback(problem, problemid, problemtype, limit, start_time)
-        except Exception:
-            logger.exception(f"[{self.account_id}] answering problem {problemid} failed")
-        finally:
-            if not submitted:
-                # Drop the claim so the next reconcile pass retries this one.
-                with self._answered_lock:
-                    self._answered.discard(problemid)
-                    self._failures[problemid] = self._failures.get(problemid, 0) + 1
-
-    def _answered_by_hand(self, problem: dict) -> bool:
-        """After a deliberate hold, check whether the user answered by hand in
-        the meantime. A failed read counts as "no": submitting beats dropping
-        the answer."""
-        if self._refreshed(problem, timeout=2).get("result") is None:
-            return False
-        self._notify_skipped(problem, "answered")
-        return True
-
-    def _submit_fallback(self, problem: dict, problemid: Any, problemtype: int, limit: int, start_time: float) -> bool:
-        """Build and submit a non-AI (random/blank) answer, honoring the
-        near-deadline hold. Shared by fallback modes and the AI no-key path."""
-        answers, source = self._build_fallback_answer(problem, problemtype)
-        min_hold, _ = self._submit_window(limit, source)
-        self._hold(min_hold - (time.time() - start_time))
-        if min_hold > 0 and self._answered_by_hand(problem):
-            return True
-        return self._submit_answer(problemid, problemtype, answers, source)
+        # This legacy entry point is permanently disabled. Confirmed submission
+        # must only be introduced through a separately verified workflow.
+        logger.warning("Answer submission blocked: confirmation workflow is unavailable")
+        return False
 
     def _emit_ai_failed(self, problemid: Any, problemtype: int, message: str) -> None:
         self.on_event("problem", {
-            "lesson": self.lessonname,
-            "lessonid": self.lessonid,
-            "problemid": problemid,
-            "problemtype": problemtype,
-            "status": "ai_failed",
-            "message": message,
+            "lesson": self.lessonname, "lessonid": self.lessonid,
+            "problemid": problemid, "problemtype": problemtype,
+            "status": "ai_failed", "message": message,
         })
-
-    def _answer_via_ai(self, problem: dict, problemid: Any, problemtype: int, limit: int, start_time: float) -> bool:
-        keys_to_try = self._ai_keys_to_try()
-        if not keys_to_try:
-            logger.warning(f"[{self.account_id}] AI mode selected but no API key configured, using fallback for problem {problemid}")
-            return self._submit_fallback(problem, problemid, problemtype, limit, start_time)
-
-        result_holder: list[Any] = [None]
-        # Set only when the AI call raised; the message rides on the ai_failed event.
-        error_holder: list[str | None] = [None]
-        ai_done = threading.Event()
-
-        logger.info(f"[{self.account_id}] Attempting AI answer for problem {problemid}")
-
-        def _call_ai():
-            try:
-                result_holder[0] = self._build_ai_answers(problem, keys_to_try)
-            except Exception as e:
-                logger.exception(f"[{self.account_id}] AI answering failed for problem {problemid}")
-                error_holder[0] = str(e) or type(e).__name__
-            finally:
-                ai_done.set()
-
-        threading.Thread(target=_call_ai, daemon=True).start()
-
-        min_hold, max_wait = self._submit_window(limit, "ai")
-        remaining_wait = max_wait - (time.time() - start_time)
-        if remaining_wait > 0:
-            ai_done.wait(timeout=remaining_wait)
-
-        # Fire ai_failed notification as soon as AI raises, so users can intervene before the fallback submit.
-        notification_sent = False
-        if error_holder[0] is not None and result_holder[0] is None:
-            self._emit_ai_failed(problemid, problemtype, error_holder[0])
-            notification_sent = True
-
-        # Hold until the earliest allowed submit time (near-deadline gate).
-        self._hold(min_hold - (time.time() - start_time))
-        if min_hold > 0 and self._answered_by_hand(problem):
-            return True
-        if result_holder[0] is not None:
-            return self._submit_answer(problemid, problemtype, result_holder[0], "ai")
-
-        # AI failed — emit notification (if not already sent) and submit fallback.
-        if not notification_sent:
-            self._emit_ai_failed(problemid, problemtype, error_holder[0] or "AI did not answer in time")
-        fallback_answer, fallback_source = self._build_fallback_answer(problem, problemtype)
-        return self._submit_answer(problemid, problemtype, fallback_answer, fallback_source)
 
     # ------------------------------------------------------------------
     # Danmu
@@ -684,6 +477,8 @@ class Lesson:
     # ------------------------------------------------------------------
 
     def _on_open(self, wsapp: websocket.WebSocketApp) -> None:
+        self.ws_health.update(state="CONNECTED", last_connected_at=datetime.now(timezone.utc).isoformat())
+        self.on_event("monitor_health_changed", {"classroom_health": {"lesson_id": self.lessonid, **self.ws_health}})
         wsapp.send(json.dumps({
             "op": "hello",
             "userid": self.user_uid,
@@ -693,13 +488,14 @@ class Lesson:
         }))
 
     def _on_message(self, wsapp: websocket.WebSocketApp, message: str) -> None:
+        self.ws_health.update(last_frame_at=datetime.now(timezone.utc).isoformat())
         self._frames += 1
         try:
             self._dispatch(json.loads(message))
         except Exception:
             # websocket-client swallows callback errors; log them here so a bad
             # frame never disappears silently.
-            logger.exception(f"[{self.account_id}][WS {self.lessonname}] frame handling failed: {message[:200]}")
+            logger.exception(f"[{self.account_id}][WS {self.lessonname}] frame handling failed")
 
     def _dispatch(self, data: dict) -> None:
         op = data.get("op", "")
@@ -726,11 +522,6 @@ class Lesson:
             # The frame names the problem by `prob` and its slide by `sid`;
             # either can be the key we hold it under.
             raw_id = problem_ref.get("prob") or problem_ref.get("sid")
-            self.on_event("problem_received", {
-                "lesson": self.lessonname,
-                "lessonid": self.lessonid,
-                "problemid": raw_id,
-            })
             problem = self._problems.get(raw_id) or self._problems.get(problem_ref.get("sid"))
             if problem is None:
                 # Its presentation is named right here — fetch on demand rather

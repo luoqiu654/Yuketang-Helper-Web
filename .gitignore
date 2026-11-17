@@ -26,3 +26,15 @@ dist/
 .claude/
 .vscode/
 .venv/
+
+# Local credentials and development-only material
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.db
+*.pem
+*.key
+.hallmark/
+V0.2迭代.md

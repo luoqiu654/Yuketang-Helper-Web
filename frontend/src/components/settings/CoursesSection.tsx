@@ -264,15 +264,10 @@ export default function CoursesSection({
   }
 
   const choiceModes: { value: ChoiceAnswerMode; label: string }[] = [
-    { value: 'ai', label: 'AI' },
-    { value: 'random', label: t('settings.random') },
-    { value: 'off', label: t('settings.disabled') },
+    { value: 'ai_suggest_confirm', label: t('settings.aiSuggestConfirm') },
+    { value: 'notify_only', label: t('settings.notifyOnly') },
   ]
-  const shortAnswerModes: { value: ShortAnswerMode; label: string }[] = [
-    { value: 'ai', label: 'AI' },
-    { value: 'blank', label: t('settings.blank') },
-    { value: 'off', label: t('settings.disabled') },
-  ]
+  const shortAnswerModes: { value: ShortAnswerMode; label: string }[] = choiceModes
 
   const saveButtonClass = (s: CourseState['saveStatus']) =>
     s === 'saved' ? 'btn-success'

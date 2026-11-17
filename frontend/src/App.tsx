@@ -10,7 +10,7 @@ import AccountSwitcher from './components/AccountSwitcher'
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   isActive ? 'nav-link active' : 'nav-link'
 
-const REPO_URL = 'https://github.com/dvdsanyi/Yuketang-Helper-Web'
+const REPO_URL = 'https://github.com/luoqiu654/Yuketang-Helper-Web'
 const VERSION = import.meta.env.VITE_APP_VERSION
 
 function Loading() {
@@ -113,7 +113,7 @@ function AppInner() {
               d="M12 .5C5.73.5.67 5.56.67 11.83c0 5.02 3.25 9.27 7.77 10.77.57.1.78-.25.78-.55 0-.27-.01-.99-.02-1.94-3.16.69-3.83-1.52-3.83-1.52-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.75 1.18 1.75 1.18 1.02 1.74 2.67 1.24 3.32.95.1-.74.4-1.24.72-1.53-2.52-.29-5.18-1.26-5.18-5.6 0-1.24.44-2.25 1.17-3.04-.12-.29-.51-1.45.11-3.02 0 0 .96-.31 3.15 1.16a10.94 10.94 0 0 1 5.74 0c2.18-1.47 3.14-1.16 3.14-1.16.62 1.57.23 2.73.11 3.02.73.79 1.16 1.8 1.16 3.04 0 4.36-2.66 5.31-5.2 5.59.41.35.77 1.03.77 2.08 0 1.5-.01 2.71-.01 3.08 0 .3.21.66.79.55 4.51-1.5 7.76-5.75 7.76-10.77C23.33 5.56 18.27.5 12 .5Z"
             />
           </svg>
-          <span>dvdsanyi/Yuketang-Helper-Web</span>
+          <span>luoqiu654/Yuketang-Helper-Web</span>
         </a>
         {VERSION ? (
           <a

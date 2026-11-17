@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import threading
+from datetime import datetime, timezone
 from collections.abc import Callable
 
 import event_log
@@ -40,6 +41,42 @@ class Monitor:
         self._loop: asyncio.AbstractEventLoop | None = None
         # Wakes the poll loop early when poll_interval is reduced.
         self._wake_event = threading.Event()
+        self._health_lock = threading.Lock()
+        self._health = {"state": "STOPPED", "last_poll_success_at": None, "consecutive_failures": 0, "last_error_code": None, "last_error_at": None}
+
+    def _health_update(self, **changes):
+        with self._health_lock:
+            previous_state = self._health.get("state")
+            self._health.update(changes)
+            changed = changes.get("state", previous_state) != previous_state
+            snapshot = dict(self._health)
+        if changed:
+            self._emit("monitor_health_changed", {"monitor_health": snapshot})
+
+    def health(self):
+        with self._health_lock:
+            result = dict(self._health)
+        with self._lock:
+            lessons = [{"lesson_id": item.lessonid, **dict(item.ws_health)}
+                       for item in self._active_lessons.values()]
+        result.update(account_id=self.account_id, lessons=lessons)
+        if result["state"] not in ("STOPPED", "SESSION_EXPIRED", "DEGRADED"):
+            if not lessons:
+                result["state"] = "IDLE" if result["last_poll_success_at"] else "CONNECTING"
+            elif all(x["state"] == "CONNECTED" for x in lessons):
+                result["state"] = "CONNECTED"
+            else:
+                result["state"] = "RECOVERING"
+        return result
+
+    def reconnect(self):
+        # Ask existing lesson loops to reconnect without stopping the monitor.
+        with self._lock:
+            lessons = list(self._active_lessons.values())
+        for lesson in lessons:
+            if lesson.wsapp:
+                lesson.wsapp.close()
+        self.wake()
 
     def wake(self) -> None:
         # Poll interval is re-read from config each cycle; kick the loop so a
@@ -51,11 +88,13 @@ class Monitor:
             return
         self._loop = loop
         self._running = True
+        self._health_update(state="CONNECTING")
         self._thread = threading.Thread(target=self._run, daemon=True, name=f"monitor-{self.account_id}")
         self._thread.start()
 
     def stop(self) -> None:
         self._running = False
+        self._health_update(state="STOPPED")
         self._wake_event.set()  # break the poll loop's wait immediately
         with self._lock:
             for lesson in list(self._active_lessons.values()):
@@ -89,31 +128,51 @@ class Monitor:
 
     def _run(self) -> None:
         rejected = 0  # consecutive polls Yuketang answered with a non-zero code
+        auth_rejected = 0
         while self._running:
             try:
                 domain, sessionid = self._current_credentials()
                 if not sessionid:
+                    self._health_update(state="SESSION_EXPIRED", last_error_code="SESSION_MISSING")
                     self._running = False
                     return
                 headers = make_headers(domain, sessionid)
                 r = http_request("GET", api_url(domain, URL_ON_LESSON), headers=headers)
+                if r.status_code == 401:
+                    auth_rejected += 1
+                    self._health_update(state="DEGRADED", consecutive_failures=auth_rejected, last_error_code="AUTH_REJECTED", last_error_at=datetime.now(timezone.utc).isoformat())
+                    if auth_rejected >= MAX_REJECTED_POLLS:
+                        self._expire_session("Authentication rejected")
+                        return
+                    self._wake_event.wait(timeout=get_poll_interval(self.account_id))
+                    self._wake_event.clear()
+                    continue
+                if r.status_code == 403:
+                    auth_rejected = 0
+                    self._health_update(state="DEGRADED", last_error_code="ACCESS_DENIED", last_error_at=datetime.now(timezone.utc).isoformat())
+                    self._wake_event.wait(timeout=get_poll_interval(self.account_id))
+                    self._wake_event.clear()
+                    continue
+                auth_rejected = 0
                 data = r.json()
                 if data.get("code") != 0:
                     # One rejection is more often a hiccup on their side than a
                     # dead session, and tearing the monitor down here would
                     # silently stop every later lesson — so count them first.
                     rejected += 1
+                    self._health_update(state="DEGRADED", consecutive_failures=rejected, last_error_code="POLL_REJECTED", last_error_at=datetime.now(timezone.utc).isoformat())
                     msg = data.get("msg", "")
                     logger.warning(f"[{self.account_id}] poll rejected ({rejected}/{MAX_REJECTED_POLLS}): {msg}")
-                    if rejected >= MAX_REJECTED_POLLS:
-                        self._expire_session(msg)
-                        return
                 else:
                     rejected = 0
+                    self._health_update(state="CONNECTING", last_poll_success_at=datetime.now(timezone.utc).isoformat(), consecutive_failures=0, last_error_code=None)
                     lesson_list = data["data"]["onLessonClassrooms"]
                     logger.info(f"[{self.account_id}] Monitor poll: {len(lesson_list)} active lesson(s)")
                     self._sync_lessons(lesson_list, domain, sessionid)
             except Exception:
+                with self._health_lock:
+                    failures = self._health["consecutive_failures"] + 1
+                self._health_update(state="DEGRADED", consecutive_failures=failures, last_error_code="POLL_FAILED", last_error_at=datetime.now(timezone.utc).isoformat())
                 logger.exception(f"[{self.account_id}] Monitor poll failed")
             # wake() and stop() both set _wake_event, so a config change or
             # shutdown takes effect immediately instead of waiting the
@@ -124,6 +183,7 @@ class Monitor:
     def _expire_session(self, message: str) -> None:
         """Give up on this account's sessionid: stop every lesson WS so they
         don't keep hammering Yuketang, and tell the app to clear the login."""
+        self._health_update(state="SESSION_EXPIRED", last_error_code="SESSION_EXPIRED", last_error_at=datetime.now(timezone.utc).isoformat())
         logger.warning(f"[{self.account_id}] Session expired: {message}")
         with self._lock:
             lessons = list(self._active_lessons.values())
@@ -220,14 +280,23 @@ class Monitor:
 
     def _emit(self, event_type: str, data: dict) -> None:
         event = {"type": event_type, "account_id": self.account_id, **data}
-        event_log.append(self.account_id, event)
+        try:
+            stored = event_log.append(self.account_id, event)
+            if isinstance(stored, dict):
+                event = stored
+        except Exception:
+            # Notification or logging failures must not stop classroom monitoring.
+            logger.exception("[%s] event persistence failed", self.account_id)
 
         lesson_id = data.get("lessonid")
         if lesson_id is not None:
             with self._lock:
                 lesson = self._active_lessons.get(lesson_id)
             if lesson is not None:
-                pushdeer.dispatch(self.account_id, str(lesson.classroomid), event_type, data)
+                try:
+                    pushdeer.dispatch(self.account_id, str(lesson.classroomid), event_type, data)
+                except Exception:
+                    logger.exception("[%s] event notification failed", self.account_id)
 
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(self.event_queue.put(event), self._loop)

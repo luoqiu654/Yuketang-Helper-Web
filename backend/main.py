@@ -10,6 +10,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
+from validation import validation_exception_handler
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -17,7 +19,7 @@ import pushdeer
 import state
 from auth import refresh_local_cache, start_monitor
 from config import STORE_DIR, list_accounts_summary
-from routers import accounts, ai, courses, domains, events, login, pushdeer_router
+from routers import accounts, ai, ai_registry, quizzes, courses, domains, events, login, pushdeer_router
 
 # ---------------------------------------------------------------------------
 # Logging — shared console + file handlers attached to root + uvicorn loggers
@@ -118,6 +120,8 @@ def _refresh_cache(account_id: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from quiz.store import recover_interrupted
+    recover_interrupted()
     broadcaster = asyncio.create_task(_broadcast_events())
     heartbeat_task = asyncio.create_task(_pushdeer_heartbeat_scheduler())
 
@@ -149,11 +153,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Yuketang Helper API", lifespan=lifespan)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.include_router(domains.router)
 app.include_router(accounts.router)
 app.include_router(login.router)
 app.include_router(courses.router)
 app.include_router(ai.router)
+app.include_router(ai_registry.router)
+app.include_router(quizzes.router)
 app.include_router(pushdeer_router.router)
 app.include_router(events.router)
 

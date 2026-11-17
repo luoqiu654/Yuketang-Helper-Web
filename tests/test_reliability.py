@@ -102,141 +102,34 @@ def stub_ai(behaviour):
 # ---------------------------------------------------------------- answering
 
 def test_answering():
-    f = Fake(); l, ev = make_lesson(f)
-    l._dispatch(HELLO); l._dispatch(UNLOCK); settle()
-    check("unlockproblem answers once", len(f.submissions) == 1, f.submissions)
-    check("submits the problemId, not the slide id",
-          f.submissions and f.submissions[0]["problemId"] == PROB, f.submissions)
+    # Legacy automated submissions are no longer allowed. The same live and
+    # recovery events must create one review task without posting an answer.
+    from quiz import store
+    dbdir = tempfile.TemporaryDirectory(prefix="review-regression-")
+    old_db = store.DB
+    store.DB = os.path.join(dbdir.name, "quizzes.sqlite3")
+    try:
+        f = Fake(); l, ev = make_lesson(f, type1="notify_only")
+        l._dispatch(HELLO); l._dispatch(UNLOCK); l._dispatch(UNLOCK); settle()
+        check("live repeated events never submit without confirmation", f.submissions == [], f.submissions)
+        check("live repeated events create one review task", len(store.list_pending("acct")) == 1)
+        check("initial problem notification is emitted once", sum(t == "problem_received" for t, _ in ev) == 1, ev)
+        f = Fake(result=["A"]); l, ev = make_lesson(f, type1="notify_only")
+        l._dispatch(HELLO); l._dispatch(UNLOCK); settle()
+        check("answer completed elsewhere is never overwritten", not f.submissions)
+        f = Fake(limit=60, send_ms=int((time.time() - 30) * 1000)); l, ev = make_lesson(f)
+        l._dispatch(HELLO)
+        check("deadline recovered from problem data", 28 <= l._remaining_limit(l._problems[PROB]) <= 30)
+    finally:
+        store.DB = old_db
+        dbdir.cleanup()
 
-    f = Fake(fail_fetch=1); l, ev = make_lesson(f)
-    l._dispatch(HELLO)
-    check("hello survives a failed presentation fetch", l._problems == {})
-    l._dispatch(UNLOCK); settle()
-    check("unlockproblem re-fetches and still answers", len(f.submissions) == 1, f.submissions)
-
-    f = Fake(); l, ev = make_lesson(f)
-    l._dispatch({"op": "showpresentation", "presentation": PRES, "unlockedproblem": [PROB]}); settle()
-    check("problem whose unlock frame we missed is still answered", len(f.submissions) == 1, f.submissions)
-
-    f = Fake(result=["A"]); l, ev = make_lesson(f)
-    l._dispatch(HELLO); l._dispatch(UNLOCK); l._dispatch(UNLOCK); settle()
-    check("an answer made elsewhere is never overwritten", f.submissions == [], f.submissions)
-
-    f = Fake(); l, ev = make_lesson(f)
-    l._dispatch(HELLO); l._dispatch(UNLOCK); settle()
-    l._dispatch(UNLOCK); l._dispatch(HELLO); settle()
-    check("repeated frames submit exactly once", len(f.submissions) == 1, f.submissions)
-
-    f = Fake(answer_code=1); l, ev = make_lesson(f)
-    l._dispatch(HELLO); l._dispatch(UNLOCK); settle()
-    statuses = [d["status"] for t, d in ev if t == "problem"]
-    check("a rejected submit is reported and retried", statuses == ["error", "success"], statuses)
-
-    f = Fake(always_reject=True); l, ev = make_lesson(f)
-    for _ in range(8):
-        l._dispatch({**HELLO, "unlockedproblem": [PROB]}); settle()
-    check("a hopeless problem stops at the retry cap", len(f.submissions) == lesson_mod._MAX_SUBMIT_FAILS,
-          f.submissions)
-
-    f = Fake(); l, ev = make_lesson(f)
-    for _ in range(6):
-        l._dispatch({"op": "showpresentation", "presentation": PRES, "unlockedproblem": ["ghost"]})
-    errors = [d for t, d in ev if t == "problem" and d.get("status") == "error"]
-    check("an unresolvable problem is reported, then dropped",
-          len(errors) == lesson_mod._MAX_SUBMIT_FAILS and f.submissions == [], (errors, f.fetches))
-
-    f = Fake(limit=60, send_ms=int((time.time() - 30) * 1000)); l, ev = make_lesson(f)
-    l._dispatch(HELLO)
-    remaining = l._remaining_limit(l._problems[PROB])
-    check("deadline recovered from the problem's own clock", 28 <= remaining <= 30, remaining)
-
-    f = Fake(); l, ev = make_lesson(f, answer_near_deadline=True)
-    l._dispatch(HELLO)
-    started = time.time()
-    l._dispatch({**UNLOCK, "problem": {**UNLOCK["problem"], "limit": 31}})
-    time.sleep(0.2)
-    l.stop_lesson()  # Monitor evicts the lesson while the answer is still holding
-    settle()
-    check("a lesson ending mid-hold submits instead of dropping the answer",
-          len(f.submissions) == 1 and time.time() - started < 3, f.submissions)
-
-    l, ev = make_lesson(Fake(), answer_near_deadline=True)
-    hold, _ = l._submit_window(60, "random")
-    check("near-deadline submits 10-15s before the deadline", 45 <= hold <= 50, hold)
-
-    f = Fake(); l, ev = make_lesson(f, answer_near_deadline=True)
-    l._dispatch(HELLO)
-    l._dispatch({**UNLOCK, "problem": {**UNLOCK["problem"], "limit": 31}})
-    time.sleep(0.2)
-    f.result = ["C"]  # the user answers by hand while we hold
-    l.stop_lesson()
-    settle()
-    skipped = [d.get("message") for t, d in ev if t == "problem" and d.get("status") == "skipped"]
-    check("an answer given by hand during the hold is not replaced",
-          f.submissions == [] and skipped == ["answered"], (f.submissions, skipped))
-
-    f = Fake(); l, ev = make_lesson(f, type1="off")
-    l._dispatch(HELLO); l._dispatch(UNLOCK); l._dispatch(UNLOCK); l._dispatch(HELLO); settle()
-    skipped = [d.get("message") for t, d in ev if t == "problem" and d.get("status") == "skipped"]
-    check("a turned-off type is reported once, not answered", f.submissions == [] and skipped == ["off"],
-          (f.submissions, skipped))
-
-    f = Fake(ptype=4); l, ev = make_lesson(f)
-    l._dispatch(HELLO); l._dispatch(UNLOCK); settle()
-    skipped = [d.get("message") for t, d in ev if t == "problem" and d.get("status") == "skipped"]
-    check("an unsupported type is reported, not silently dropped", skipped == ["unsupported"], skipped)
-
-    f = Fake(limit=60, send_ms=int(time.time() * 1000)); l, ev = make_lesson(f)
-    l._dispatch(HELLO)
-    l._dispatch({"op": "showpresentation", "dt": (time.time() + 30) * 1000})  # server clock 30s ahead
-    l._dispatch({"op": "showpresentation", "dt": (time.time() - 600) * 1000})  # a stale timestamp
-    remaining = l._remaining_limit(l._problems[PROB])
-    check("deadlines follow the server clock, never a stale timestamp", 28 <= remaining <= 30, remaining)
-
-
-# ----------------------------------------------------------------- AI paths
 
 def test_ai():
-    stub_ai(lambda: ["B"])
-    f = Fake(); l, ev = make_lesson(f, type1="ai")
-    l._dispatch(HELLO); l._dispatch(UNLOCK); settle()
-    check("AI answer is submitted", [s["result"] for s in f.submissions] == [["B"]], f.submissions)
-    check("source recorded as ai", [d["source"] for t, d in ev if t == "problem"] == ["ai"])
-
-    def boom(): raise RuntimeError("provider down")
-    stub_ai(boom)
-    f = Fake(); l, ev = make_lesson(f, type1="ai")
-    l._dispatch(HELLO); l._dispatch(UNLOCK); settle()
-    problem_events = [d for t, d in ev if t == "problem"]
-    check("AI failure falls back to a generated answer",
-          len(f.submissions) == 1 and problem_events[-1].get("source") == "random", problem_events)
-    check("AI failure is notified with its reason",
-          any(d.get("status") == "ai_failed" and "provider down" in d.get("message", "")
-              for d in problem_events), problem_events)
-
-    calls = []
-    stub_ai(lambda: calls.append(1) or ["A"])
-    f = Fake(cover=""); l, ev = make_lesson(f, type1="ai")
-    l._dispatch(HELLO); l._dispatch(UNLOCK); settle()
-    problem_events = [d for t, d in ev if t == "problem"]
-    check("a slide without a cover skips AI and falls back",
-          calls == [] and len(f.submissions) == 1 and problem_events[-1].get("source") == "random",
-          (calls, problem_events))
-    check("a missing cover is the reported reason",
-          any(d.get("message") == "slide has no cover image" for d in problem_events), problem_events)
-
-    calls = []
-    stub_ai(lambda: calls.append(1) or ["A"])
-    f = Fake(cover=""); l, ev = make_lesson(f, type1="ai")
-    l._dispatch(HELLO)
-    f.cover = "http://cover"  # the slide image finished rendering after our first fetch
-    l._dispatch(UNLOCK); settle()
-    check("a cover missing from the cached slide is re-read before giving up on AI",
-          calls == [1] and [s["result"] for s in f.submissions] == [["A"]], (calls, f.submissions))
-
+    # Verify parsing failure in the legacy provider without making a network call.
     qwen = QwenProvider.__new__(QwenProvider)
     qwen.model = "m"
-    null_reply = SimpleNamespace(choices=None)  # what ModelScope sends for some failures
+    null_reply = SimpleNamespace(choices=None)
     qwen.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **k: null_reply)))
     try:
         qwen.answer_options("http://cover", ["A", "B"], 1, 1)
@@ -244,16 +137,6 @@ def test_ai():
     except RuntimeError as e:
         reason = str(e)
     check("a ModelScope reply without choices raises a readable error", "choices is null" in reason, reason)
-
-    stub_ai(lambda: time.sleep(30) or ["A"])  # provider hangs past the deadline
-    f = Fake(); l, ev = make_lesson(f, type1="ai", answer_near_deadline=True)
-    l._dispatch(HELLO)
-    started = time.time()
-    l._dispatch({**UNLOCK, "problem": {**UNLOCK["problem"], "limit": 7}})
-    settle()
-    elapsed = time.time() - started
-    check("a hung AI is waited for, then a fallback goes in before the deadline",
-          len(f.submissions) == 1 and 4 < elapsed < 6.5, round(elapsed, 1))
 
 
 # ----------------------------------------------------------------- check-in
@@ -289,7 +172,7 @@ def test_poll_loop():
         def fake(method, url, **kw):
             code = next(seq, 0)
             polls.append(code)
-            return SimpleNamespace(headers={}, json=lambda: {
+            return SimpleNamespace(status_code=401 if code == 401 else 200, headers={}, json=lambda: {
                 "code": code, "msg": "server busy", "data": {"onLessonClassrooms": []}})
 
         monitor_mod.http_request = fake
@@ -312,7 +195,7 @@ def test_poll_loop():
 
     pushed = []
     monitor_mod.pushdeer.send_session_expired = pushed.append
-    m, events, polls = run_monitor([1, 1, 1, 1])
+    m, events, polls = run_monitor([401, 401, 401, 401])
     time.sleep(3.4)
     check("a genuinely dead session expires after the cap",
           not m._running and events.count("session_expired") == 1, (events, polls))

@@ -12,8 +12,8 @@ LOG_DIR = ROOT / "logs"
 
 # Defaults: 127.0.0.1 to keep dev surface off the LAN. Override via env to expose.
 HOST = os.environ.get("HOST", "127.0.0.1")
-BACKEND_PORT = int(os.environ.get("PORT", "8500"))
-FRONTEND_PORT = int(os.environ.get("FRONTEND_PORT", "5173"))
+BACKEND_PORT = int(os.environ.get("PORT", "8501"))
+FRONTEND_PORT = int(os.environ.get("FRONTEND_PORT", "5174"))
 
 
 def _port_free(host: str, port: int) -> bool:
@@ -26,8 +26,9 @@ def _port_free(host: str, port: int) -> bool:
 
 
 def start():
-    stop()
     LOG_DIR.mkdir(exist_ok=True)
+    if (LOG_DIR / 'pids.json').exists():
+        sys.exit('Existing PID file found; inspect it before starting another instance.')
 
     bind_host = "127.0.0.1" if HOST in ("127.0.0.1", "localhost") else "0.0.0.0"
     for name, port in [("Backend", BACKEND_PORT), ("Frontend", FRONTEND_PORT)]:

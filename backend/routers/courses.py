@@ -47,3 +47,19 @@ async def update_course_settings(course_id: str, body: CourseSettingsModel, acco
         m.update_lesson_config(course_id, data)
 
     return {"ok": True, "course_id": course_id, "config": data}
+
+
+@router.get("/api/accounts/{account_id}/monitor/health")
+async def monitor_health(account_id: str = AccountDep):
+    monitor = state.get_monitor(account_id)
+    return monitor.health() if monitor else {"account_id": account_id, "state": "STOPPED", "lessons": [], "last_poll_success_at": None}
+
+
+@router.post("/api/accounts/{account_id}/monitor/reconnect")
+async def monitor_reconnect(account_id: str = AccountDep):
+    from fastapi import HTTPException
+    monitor = state.get_monitor(account_id)
+    if not monitor:
+        raise HTTPException(status_code=409, detail="Monitor is not running")
+    monitor.reconnect()
+    return {"ok": True}

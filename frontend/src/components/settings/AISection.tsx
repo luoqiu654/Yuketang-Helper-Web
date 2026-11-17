@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import type { AIKeyEntry, AISettings, AIProviderName } from '../../types'
 import MiddleTruncate from '../MiddleTruncate'
 import Switch from '../Switch'
+import ProviderManager from '../ai/ProviderManager'
 
 const PROVIDER_LABELS: Record<AIProviderName, string> = {
   google: 'Google',
@@ -147,6 +148,7 @@ export default function AISection({
         </div>
         <p className="settings-card-hint">{t('common.betaWarning')}</p>
       </div>
+      <ProviderManager key={base} base={base} />
     </section>
   )
 }
