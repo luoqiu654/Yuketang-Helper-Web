@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 import event_log
 import pushdeer
+import windows_notifications
 from config import (
     api_url, get_course_config, get_domain, get_poll_interval,
     get_sessionid, http_request, make_headers,
@@ -297,6 +298,10 @@ class Monitor:
                     pushdeer.dispatch(self.account_id, str(lesson.classroomid), event_type, data)
                 except Exception:
                     logger.exception("[%s] event notification failed", self.account_id)
+                try:
+                    windows_notifications.dispatch(self.account_id, str(lesson.classroomid), event_type, data)
+                except Exception:
+                    logger.exception("[%s] Windows notification dispatch failed", self.account_id)
 
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(self.event_queue.put(event), self._loop)

@@ -19,7 +19,7 @@ import pushdeer
 import state
 from auth import refresh_local_cache, start_monitor
 from config import STORE_DIR, list_accounts_summary
-from routers import accounts, ai, ai_registry, quizzes, courses, domains, events, login, pushdeer_router
+from routers import accounts, ai, ai_registry, quizzes, courses, domains, events, login, pushdeer_router, windows_notification_router
 
 # ---------------------------------------------------------------------------
 # Logging — shared console + file handlers attached to root + uvicorn loggers
@@ -160,6 +160,7 @@ app.include_router(login.router)
 app.include_router(courses.router)
 app.include_router(ai.router)
 app.include_router(ai_registry.router)
+app.include_router(windows_notification_router.router)
 app.include_router(quizzes.router)
 app.include_router(pushdeer_router.router)
 app.include_router(events.router)

@@ -137,6 +137,7 @@ export default function Dashboard() {
   const accountId = activeAccount?.id ?? null
   const [allCourses, setAllCourses] = useState<CourseItem[]>([])
   const [events, setEvents] = useState<ActivityEvent[]>([])
+  const [disabledCourses, setDisabledCourses] = useState<Set<string>>(new Set())
   const [browserConnected, setBrowserConnected] = useState(false)
   const logRef = useRef<HTMLDivElement>(null)
 
@@ -180,13 +181,14 @@ export default function Dashboard() {
     if (!accountId) return
     fetch(`/api/accounts/${accountId}/courses/settings`)
       .then((r) => r.json())
-      .then((data: Record<string, { notification: NotificationSub; voice_notification: NotificationSub }>) => {
+      .then((data: Record<string, { notification: NotificationSub; voice_notification: NotificationSub; course_enabled: boolean }>) => {
         const voiceMap: Record<string, NotificationSub> = {}
         const notifMap: Record<string, NotificationSub> = {}
         for (const [id, cfg] of Object.entries(data)) {
           notifMap[id] = cfg.notification
           voiceMap[id] = cfg.voice_notification
         }
+        setDisabledCourses(new Set(Object.entries(data).filter(([, cfg]) => cfg.course_enabled === false).map(([id]) => id)))
         notifConfigsRef.current = notifMap
         voiceConfigsRef.current = voiceMap
       })
@@ -201,6 +203,7 @@ export default function Dashboard() {
       return
     }
     setEvents([]) // clear stale events from previous account
+    setDisabledCourses(new Set())
     fetchAllCourses()
     fetchLessons()
     fetchCourseConfigs()
@@ -321,28 +324,35 @@ export default function Dashboard() {
         {allCourses.length === 0 ? (
           <p className="empty-message">{t('dashboard.noCourses')}</p>
         ) : (
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>{t('dashboard.course')}</th>
-                <th>{t('dashboard.teacher')}</th>
-                <th>{t('dashboard.status')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {allCourses.map((course) => (
-                <tr key={course.classroom_id}>
-                  <td className="cell-fill"><MiddleTruncate text={course.name} /></td>
-                  <td>{course.teacher_name ?? t('common.unknown')}</td>
-                  <td>
-                    <span className={`badge ${course.active ? 'badge-green' : 'badge-gray'}`}>
-                      {course.active ? t('dashboard.active') : t('dashboard.inactive')}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <>
+            <table className="data-table">
+              <thead><tr><th>{t('dashboard.course')}</th><th>{t('dashboard.teacher')}</th><th>{t('dashboard.status')}</th></tr></thead>
+              <tbody>
+                {allCourses.filter(course => !disabledCourses.has(String(course.classroom_id))).map(course => (
+                  <tr key={course.classroom_id}>
+                    <td className="cell-fill"><MiddleTruncate text={course.name} /></td>
+                    <td>{course.teacher_name ?? t('common.unknown')}</td>
+                    <td><span className={`badge ${course.active ? 'badge-green' : 'badge-gray'}`}>{course.active ? t('dashboard.active') : t('dashboard.inactive')}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {allCourses.some(course => disabledCourses.has(String(course.classroom_id))) && (
+              <details className="disabled-courses">
+                <summary>{t('dashboard.disabledCourses', { count: allCourses.filter(course => disabledCourses.has(String(course.classroom_id))).length })}</summary>
+                <table className="data-table">
+                  <thead><tr><th>{t('dashboard.course')}</th><th>{t('dashboard.teacher')}</th><th>{t('dashboard.status')}</th></tr></thead>
+                  <tbody>{allCourses.filter(course => disabledCourses.has(String(course.classroom_id))).map(course => (
+                    <tr key={course.classroom_id}>
+                      <td className="cell-fill"><MiddleTruncate text={course.name} /></td>
+                      <td>{course.teacher_name ?? t('common.unknown')}</td>
+                      <td><span className={`badge ${course.active ? 'badge-green' : 'badge-gray'}`}>{course.active ? t('dashboard.active') : t('dashboard.inactive')}</span></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </details>
+            )}
+          </>
         )}
       </section>
 

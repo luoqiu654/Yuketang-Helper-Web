@@ -34,6 +34,7 @@ export interface CourseSettings {
   danmu_threshold: number
   notification: NotificationSub
   voice_notification: NotificationSub
+  windows_notification: NotificationSub
   pushdeer_notification: NotificationSub
 }
 

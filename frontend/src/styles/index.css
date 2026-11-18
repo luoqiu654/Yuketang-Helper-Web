@@ -1422,3 +1422,11 @@ button:disabled, input:disabled, select:disabled { cursor: not-allowed; }
   outline: 3px solid var(--color-focus);
   outline-offset: 2px;
 }
+
+.monitor-health__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.course-card-header--collapsible { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.course-card-header--collapsible .course-card-title { min-width: 0; }
+.course-card [hidden] { display: none; }
+.disabled-courses { margin-top: 16px; }
+.disabled-courses summary { cursor: pointer; color: var(--color-text-secondary); padding: 8px 0; }
+.disabled-courses summary:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; }

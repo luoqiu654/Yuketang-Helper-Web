@@ -38,3 +38,4 @@ dist/
 *.key
 .hallmark/
 V0.2迭代.md
+config.json

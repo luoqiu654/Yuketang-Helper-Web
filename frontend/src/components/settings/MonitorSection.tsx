@@ -14,6 +14,7 @@ export default function MonitorSection({
   const { t } = useTranslation()
   const [settings, setSettings] = useState<PollIntervalSettings>(initial)
   const [input, setInput] = useState<string>(String(initial.poll_interval))
+  const [toastStatus, setToastStatus] = useState<'idle' | 'testing' | 'sent' | 'error'>('idle')
   const [status, setStatus] = useState<SaveStatus>('idle')
 
   const handleSave = async () => {
@@ -89,6 +90,19 @@ export default function MonitorSection({
             </button>
           </div>
         </div>
+        <div className="form-row form-row-padded form-row-padded-y">
+          <span className="form-label">{t('settings.windowsNotificationTestLabel')}</span>
+          <button className="btn btn-sm btn-secondary" type="button" disabled={toastStatus === 'testing'} onClick={async () => {
+            setToastStatus('testing')
+            try {
+              const response = await fetch(`${base}/windows-notifications/test`, { method: 'POST' })
+              const result = await response.json()
+              setToastStatus(response.ok && result.ok ? 'sent' : 'error')
+            } catch { setToastStatus('error') }
+          }}>{toastStatus === 'testing' ? t('settings.windowsNotificationTesting') : t('settings.windowsNotificationTest')}</button>
+        </div>
+        {toastStatus === 'sent' && <p className="settings-card-hint" role="status">{t('settings.windowsNotificationSent')}</p>}
+        {toastStatus === 'error' && <p className="settings-card-hint" role="alert">{t('settings.windowsNotificationError')}</p>}
       </div>
     </section>
   )

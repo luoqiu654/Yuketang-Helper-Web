@@ -97,6 +97,7 @@ class CourseSettingsModel(BaseModel):
     notification: NotificationSubModel = Field(default_factory=NotificationSubModel)
     voice_notification: NotificationSubModel = Field(default_factory=NotificationSubModel)
     pushdeer_notification: NotificationSubModel = Field(default_factory=NotificationSubModel)
+    windows_notification: NotificationSubModel = Field(default_factory=NotificationSubModel)
 
 
 class AIKeyModel(BaseModel):

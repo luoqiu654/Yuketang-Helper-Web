@@ -30,7 +30,8 @@
     "teacher": "Teacher",
     "status": "Status",
     "active": "Active",
-    "inactive": "Inactive"
+    "inactive": "Inactive",
+    "disabledCourses": "Disabled courses ({{count}})"
   },
   "settings": {
     "title": "Course Settings",
@@ -101,7 +102,17 @@
     "pollIntervalDesc": "How often to check Yuketang for active lessons. Allowed: {{min}}–{{max}}s (default {{default}}s). Lower = faster lesson detection but more API requests.",
     "seconds": "seconds",
     "aiSuggestConfirm": "AI suggestion and confirmation (in development)",
-    "notifyOnly": "Notify only"
+    "notifyOnly": "Notify only",
+    "expandCourse": "Expand settings",
+    "collapseCourse": "Collapse settings",
+    "windowsNotification": "Windows notifications",
+    "windowsNotificationRestart": "Windows notifications require the updated backend. Restart the development app, then refresh this page.",
+    "courseDisabled": "Disabled",
+    "windowsNotificationTestLabel": "Windows notification",
+    "windowsNotificationTest": "Send test",
+    "windowsNotificationTesting": "Testing…",
+    "windowsNotificationSent": "Windows accepted the request. If no banner appears, check notifications for Windows PowerShell and focus settings.",
+    "windowsNotificationError": "Notification could not be sent. Check Windows notification settings and restart the development backend."
   },
   "speech": {
     "signin": "{{lesson}} checked in",

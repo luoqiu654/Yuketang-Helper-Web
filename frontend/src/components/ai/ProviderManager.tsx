@@ -2,11 +2,12 @@ import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import '../../styles/provider-manager.css'
 
-type Provider = { id: string; name: string; base_url: string; enabled: boolean; proxy_mode: string; has_key: boolean }
+type Protocol = 'openai_chat_completions' | 'openai_responses' | 'gemini_native' | 'anthropic_messages'
+type Provider = { id: string; name: string; base_url: string; enabled: boolean; proxy_mode: string; has_key: boolean; protocol: Protocol }
 type Model = { id: string; provider_id: string; model_id: string; display_name: string; supports_vision: string; image_transport: string; timeout_seconds: number; max_output_tokens: number; enabled: boolean }
 type ProviderForm = Omit<Provider, 'id' | 'has_key'> & { api_key: string }
 type ModelForm = Omit<Model, 'id' | 'provider_id'>
-const emptyProvider = (): ProviderForm => ({ name: '', base_url: '', api_key: '', enabled: true, proxy_mode: 'system' })
+const emptyProvider = (): ProviderForm => ({ name: '', base_url: '', api_key: '', enabled: true, proxy_mode: 'system', protocol: 'openai_chat_completions' })
 const emptyModel = (): ModelForm => ({ model_id: '', display_name: '', supports_vision: 'unknown', image_transport: 'url', timeout_seconds: 20, max_output_tokens: 128, enabled: true })
 
 async function request(url: string, options?: RequestInit) {
@@ -33,6 +34,8 @@ export default function ProviderManager({ base }: { base: string }) {
   const [result, setResult] = useState('')
   const [discovery, setDiscovery] = useState('')
   const [testing, setTesting] = useState<string | null>(null)
+  const [supportedProtocols, setSupportedProtocols] = useState<string[]>(['openai_chat_completions'])
+  const [protocolCapabilityReady, setProtocolCapabilityReady] = useState(false)
 
   const reload = useCallback(async () => {
     const list: Provider[] = await request(`${base}/ai/providers`)
@@ -42,7 +45,7 @@ export default function ProviderManager({ base }: { base: string }) {
     setProviders(list)
     setModels(Object.fromEntries(entries))
   }, [base])
-  useEffect(() => { let active = true; setProviders([]); setModels({}); request(`${base}/ai/providers`).then(async (list: Provider[]) => {
+  useEffect(() => { let active = true; setProviders([]); setModels({}); setProtocolCapabilityReady(false); request('/api/ai/protocols').then(data => { if (active && Array.isArray(data.protocols)) setSupportedProtocols(data.protocols) }).catch(() => { if (active) setSupportedProtocols(['openai_chat_completions']) }).finally(() => { if (active) setProtocolCapabilityReady(true) }); request(`${base}/ai/providers`).then(async (list: Provider[]) => {
     const selection = await request(`${base}/ai/default`)
     if (active) setDefaultModel(selection.model_id)
     const entries = await Promise.all(list.map(async p => [p.id, await request(`${base}/ai/providers/${encodeURIComponent(p.id)}/models`) as Model[]] as const))
@@ -58,10 +61,11 @@ export default function ProviderManager({ base }: { base: string }) {
     finally { setBusy(false) }
   }
   const saveProvider = () => action(async () => {
+    if (!protocolCapabilityReady || !supportedProtocols.includes(providerForm.protocol)) throw new Error(tr('请重启后端以使用该 API 格式', 'Restart the backend to use this API format'))
     await request(`${base}/ai/providers${providerEdit ? `/${encodeURIComponent(providerEdit)}` : ''}`, json(providerEdit ? 'PATCH' : 'POST', providerForm))
     setProviderForm(emptyProvider()); setProviderEdit(null)
   })
-  const editProvider = (p: Provider) => { setProviderEdit(p.id); setProviderForm({ name: p.name, base_url: p.base_url, api_key: '', enabled: !!p.enabled, proxy_mode: p.proxy_mode }) }
+  const editProvider = (p: Provider) => { setProviderEdit(p.id); setProviderForm({ name: p.name, base_url: p.base_url, api_key: '', enabled: !!p.enabled, proxy_mode: p.proxy_mode, protocol: p.protocol ?? 'openai_chat_completions' }) }
   const saveModel = () => action(async () => {
     if (!modelProvider) return
     const url = modelEdit ? `${base}/ai/models/${encodeURIComponent(modelEdit)}` : `${base}/ai/providers/${encodeURIComponent(modelProvider)}/models`
@@ -75,21 +79,22 @@ export default function ProviderManager({ base }: { base: string }) {
     setTesting(m.id)
     void action(async () => {
       const value = await request(`${base}/ai/models/${encodeURIComponent(m.id)}/test`, json('POST', { test_type: type, timeout_seconds: m.timeout_seconds, request_id: globalThis.crypto.randomUUID() }))
-      setResult(`${m.display_name} · ${type}: ${value.status === 'passed' ? tr('通过', 'Passed') : tr('失败', 'Failed')} · ${value.latency_ms} ms${value.error_code ? ` · ${value.error_code}` : ''}${type === 'vision' ? tr('（仅代表此测试图片的结果）', ' (result applies only to this test image)') : ''}`)
+      const transportHint = type === 'vision' && value.error_code === 'IMAGE_UNSUPPORTED' && providers.find(p => p.id === m.provider_id)?.protocol === 'gemini_native' && m.image_transport !== 'data_url' ? tr('（请编辑模型，将图片传输设置为 Data URL）', ' (edit the model and set image transport to Data URL)') : ''
+      setResult(`${m.display_name} · ${type}: ${value.status === 'passed' ? tr('通过', 'Passed') : tr('失败', 'Failed')} · ${value.latency_ms} ms${value.error_code ? ` · ${value.error_code}` : ''}${transportHint}${type === 'vision' ? tr('（仅代表此测试图片的结果）', ' (result applies only to this test image)') : ''}`)
     }).finally(() => setTesting(null))
   }
   return <div className="card provider-manager">
     <h3 className="provider-manager__title">{tr('自定义 AI 供应商', 'Custom AI providers')}</h3>
-    <p className="provider-manager__description">{tr('支持 OpenAI Chat Completions 兼容接口。模型可用于连接测试与课堂答案建议；提交需经过人工确认。', 'OpenAI Chat Completions compatible APIs. Models can be tested and used for classroom suggestions; submission requires explicit confirmation.')}</p>
-    <p className="provider-manager__hint">{tr('基础地址需使用 HTTPS，通常以 /v1 结尾；请自行确认服务商要求。', 'The base URL must use HTTPS and commonly ends in /v1; check your provider documentation.')}</p>
-    {error && <p className="provider-manager__alert" role="alert">{error}</p>}{result && <p className="provider-manager__notice" role="status">{result}</p>}{discovery && <p className="provider-manager__notice" role="status">{discovery}</p>}
+    <p className="provider-manager__description">{tr('支持 OpenAI Chat Completions、OpenAI Responses、Gemini 和 Anthropic Messages 协议。模型可用于连接测试和课堂答案建议；当前版本尚不能提交答案。', 'Supports OpenAI Chat Completions, OpenAI Responses, Gemini and Anthropic Messages. Models can be tested and used for suggestions; submissions are unavailable in this version.')}</p>
+    <p className="provider-manager__hint">{tr('基础地址需使用 HTTPS：OpenAI 和 Anthropic 通常以 /v1 结尾，Gemini 通常以 /v1beta 结尾。Gemini 图片使用 Data URL。', 'Use HTTPS: OpenAI and Anthropic typically end in /v1, Gemini in /v1beta. Gemini images use Data URL.')}</p>
+    {protocolCapabilityReady && supportedProtocols.length === 1 && <p className="provider-manager__alert" role="status">{tr('当前后端尚未加载新的 API 格式，请重启开发版后再使用。', 'Restart the development backend to use the new API formats.')}</p>}{error && <p className="provider-manager__alert" role="alert">{error}</p>}{result && <p className="provider-manager__notice" role="status">{result}</p>}{discovery && <p className="provider-manager__notice" role="status">{discovery}</p>}
     {providers.map(p => <div key={p.id} className="credential-item provider-manager__provider">
-      <div className="provider-manager__identity"><strong>{p.name}</strong><span className="provider-manager__url">{p.base_url}</span><span className="provider-manager__status">{p.enabled ? tr('已启用', 'Enabled') : tr('已停用', 'Disabled')}</span></div>
+      <div className="provider-manager__identity"><strong>{p.name}</strong><span className="provider-manager__status">{p.protocol === 'openai_responses' ? 'OpenAI Responses' : p.protocol === 'gemini_native' ? 'Gemini' : p.protocol === 'anthropic_messages' ? 'Anthropic Messages' : 'OpenAI Chat Completions'}</span><span className="provider-manager__url">{p.base_url}</span><span className="provider-manager__status">{p.enabled ? tr('已启用', 'Enabled') : tr('已停用', 'Disabled')}</span></div>
       <div className="credential-actions">
         <button className="btn btn-sm btn-secondary" disabled={busy} onClick={() => editProvider(p)}>{tr('编辑', 'Edit')}</button>
-        <button className="btn btn-sm btn-secondary" disabled={busy} onClick={() => void action(async () => { await request(`${base}/ai/providers/${encodeURIComponent(p.id)}`, json('PATCH', { name: p.name, base_url: p.base_url, api_key: '', enabled: !p.enabled, proxy_mode: p.proxy_mode })) })}>{p.enabled ? tr('停用', 'Disable') : tr('启用', 'Enable')}</button>
+        <button className="btn btn-sm btn-secondary" disabled={busy} onClick={() => void action(async () => { await request(`${base}/ai/providers/${encodeURIComponent(p.id)}`, json('PATCH', { name: p.name, base_url: p.base_url, api_key: '', enabled: !p.enabled, proxy_mode: p.proxy_mode, protocol: p.protocol ?? 'openai_chat_completions' })) })}>{p.enabled ? tr('停用', 'Disable') : tr('启用', 'Enable')}</button>
         <button className="btn btn-sm btn-danger" disabled={busy} onClick={() => { if (window.confirm(tr('删除此供应商及其所有模型？', 'Delete this provider and all its models?'))) void action(async () => { await request(`${base}/ai/providers/${encodeURIComponent(p.id)}`, { method: 'DELETE' }) }) }}>{tr('删除', 'Delete')}</button>
-        <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => { setModelProvider(p.id); setModelEdit(null); setModelForm(emptyModel()) }}>{tr('添加模型', 'Add model')}</button>
+        <button className="btn btn-sm btn-primary" disabled={busy} onClick={() => { setModelProvider(p.id); setModelEdit(null); setModelForm({ ...emptyModel(), image_transport: p.protocol === 'gemini_native' ? 'data_url' : 'url' }) }}>{tr('添加模型', 'Add model')}</button>
         <button className="btn btn-sm btn-secondary" disabled={busy || !p.enabled} onClick={() => void action(async () => { const data = await request(`${base}/ai/providers/${encodeURIComponent(p.id)}/models/discover`, { method: 'POST' }); setDiscovery(`${p.name}: ${(data.models as string[]).join(', ') || tr('未返回模型', 'No models returned')}`) })}>{tr('发现模型', 'Discover models')}</button>
       </div>
       {(models[p.id] ?? []).map(m => <div key={m.id} className="provider-manager__model"><div className="provider-manager__model-heading"><strong>{m.display_name}</strong><span className="provider-manager__model-id">{m.model_id}</span><span className="provider-manager__status">{m.enabled ? tr('已启用', 'Enabled') : tr('已停用', 'Disabled')}</span></div>
@@ -104,6 +109,7 @@ export default function ProviderManager({ base }: { base: string }) {
     <h4 className="provider-manager__form-heading">{providerEdit ? tr('编辑供应商', 'Edit provider') : tr('添加供应商', 'Add provider')}</h4>
     <div className="credential-add-fields provider-manager__fields">
       <label>{tr('名称', 'Name')}<input className="form-input" value={providerForm.name} onChange={e => setProviderForm({ ...providerForm, name: e.target.value })} /></label>
+      <label>{tr('API 格式', 'API format')}<select className="form-select" value={providerForm.protocol} onChange={e => setProviderForm({ ...providerForm, protocol: e.target.value as Protocol })}><option value="openai_chat_completions">OpenAI Chat Completions</option><option disabled={!supportedProtocols.includes('openai_responses')} value="openai_responses">OpenAI Responses</option><option disabled={!supportedProtocols.includes('gemini_native')} value="gemini_native">Gemini Native</option><option disabled={!supportedProtocols.includes('anthropic_messages')} value="anthropic_messages">Anthropic Messages</option></select></label>
       <label>Base URL<input className="form-input" type="url" placeholder="https://example.com/v1" value={providerForm.base_url} onChange={e => setProviderForm({ ...providerForm, base_url: e.target.value })} /></label>
       <label>API Key<input className="form-input" type="password" autoComplete="new-password" value={providerForm.api_key} placeholder={providerEdit ? tr('留空保留现有密钥', 'Leave blank to keep existing key') : ''} onChange={e => setProviderForm({ ...providerForm, api_key: e.target.value })} /></label>
       <label>{tr('代理', 'Proxy')}<select className="form-select" value={providerForm.proxy_mode} onChange={e => setProviderForm({ ...providerForm, proxy_mode: e.target.value })}><option value="system">{tr('系统设置', 'System')}</option><option value="direct">{tr('直连', 'Direct')}</option></select></label>

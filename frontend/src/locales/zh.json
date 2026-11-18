@@ -30,7 +30,8 @@
     "teacher": "教师",
     "status": "状态",
     "active": "进行中",
-    "inactive": "未开课"
+    "inactive": "未开课",
+    "disabledCourses": "未启用课程（{{count}}）"
   },
   "settings": {
     "title": "课程设置",
@@ -101,7 +102,17 @@
     "pollIntervalDesc": "检查雨课堂是否开课的间隔。允许范围：{{min}}–{{max}} 秒（默认 {{default}} 秒）。值越小开课检测越快，但 API 请求越多。",
     "seconds": "秒",
     "aiSuggestConfirm": "AI 建议，人工确认（开发中）",
-    "notifyOnly": "仅提醒"
+    "notifyOnly": "仅提醒",
+    "expandCourse": "展开设置",
+    "collapseCourse": "收起设置",
+    "windowsNotification": "Windows 系统通知",
+    "windowsNotificationRestart": "系统通知需要新版后端；请重启开发版后刷新页面。",
+    "courseDisabled": "未启用",
+    "windowsNotificationTestLabel": "Windows 系统通知",
+    "windowsNotificationTest": "发送测试",
+    "windowsNotificationTesting": "正在测试…",
+    "windowsNotificationSent": "Windows 已接受通知请求；若未看到横幅，请检查系统设置中的 Windows PowerShell 通知及勿扰模式。",
+    "windowsNotificationError": "通知未能发送，请确认系统通知可用并重启开发版后重试。"
   },
   "speech": {
     "signin": "{{lesson}}已签到",

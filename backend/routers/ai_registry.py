@@ -16,6 +16,7 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from config import STORE_DIR
+from ai_protocols import SUPPORTED_PROTOCOLS, ProtocolError, request_parts, response_text, discovery_headers
 from routers._common import AccountDep
 
 router = APIRouter()
@@ -50,15 +51,21 @@ def protect(value: bytes, decrypt=False) -> bytes:
 @contextmanager
 def connection():
     db = sqlite3.connect(DB, timeout=10)
-    db.row_factory = sqlite3.Row
-    db.execute('PRAGMA foreign_keys=ON')
-    db.execute('CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL, credential BLOB NOT NULL, enabled INTEGER NOT NULL, proxy_mode TEXT NOT NULL)')
-    db.execute('CREATE TABLE IF NOT EXISTS models (id TEXT PRIMARY KEY, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE, model_id TEXT NOT NULL, display_name TEXT NOT NULL, supports_vision TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, max_output_tokens INTEGER NOT NULL, enabled INTEGER NOT NULL, test_result TEXT)')
-    if 'image_transport' not in {r[1] for r in db.execute('PRAGMA table_info(models)')}:
-        db.execute("ALTER TABLE models ADD COLUMN image_transport TEXT NOT NULL DEFAULT 'url'")
-    db.execute('CREATE TABLE IF NOT EXISTS model_defaults (account_id TEXT PRIMARY KEY, model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE)')
-    db.execute('CREATE TABLE IF NOT EXISTS model_tests (model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE, test_type TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY (model_id, test_type))')
     try:
+        db.row_factory = sqlite3.Row
+        db.execute('PRAGMA foreign_keys=ON')
+        # Serialize first-run migrations across request threads and processes.
+        # Commit before yielding so a slow provider call does not hold this lock.
+        with db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, account_id TEXT NOT NULL, name TEXT NOT NULL, base_url TEXT NOT NULL, credential BLOB NOT NULL, enabled INTEGER NOT NULL, proxy_mode TEXT NOT NULL)')
+            if 'protocol' not in {r[1] for r in db.execute('PRAGMA table_info(providers)')}:
+                db.execute("ALTER TABLE providers ADD COLUMN protocol TEXT NOT NULL DEFAULT 'openai_chat_completions'")
+            db.execute('CREATE TABLE IF NOT EXISTS models (id TEXT PRIMARY KEY, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE, model_id TEXT NOT NULL, display_name TEXT NOT NULL, supports_vision TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, max_output_tokens INTEGER NOT NULL, enabled INTEGER NOT NULL, test_result TEXT)')
+            if 'image_transport' not in {r[1] for r in db.execute('PRAGMA table_info(models)')}:
+                db.execute("ALTER TABLE models ADD COLUMN image_transport TEXT NOT NULL DEFAULT 'url'")
+            db.execute('CREATE TABLE IF NOT EXISTS model_defaults (account_id TEXT PRIMARY KEY, model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE)')
+            db.execute('CREATE TABLE IF NOT EXISTS model_tests (model_id TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE, test_type TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY (model_id, test_type))')
         with db:
             yield db
     finally:
@@ -70,6 +77,13 @@ class Provider(BaseModel):
     api_key: str = Field(default='', max_length=4096)
     enabled: bool = True
     proxy_mode: str = 'system'
+    protocol: str = 'openai_chat_completions'
+    @field_validator('protocol')
+    @classmethod
+    def validate_protocol(cls, value):
+        if value not in SUPPORTED_PROTOCOLS:
+            raise ValueError('Unsupported API protocol')
+        return value
     @field_validator('base_url')
     @classmethod
     def url(cls, value):
@@ -112,16 +126,20 @@ def provider(db, account_id, provider_id):
     return row
 
 def model(db, account_id, model_id):
-    row = db.execute('SELECT m.*, p.account_id, p.base_url, p.credential, p.proxy_mode, p.enabled AS provider_enabled FROM models m JOIN providers p ON p.id=m.provider_id WHERE m.id=? AND p.account_id=?', (model_id, account_id)).fetchone()
+    row = db.execute('SELECT m.*, p.account_id, p.base_url, p.credential, p.proxy_mode, p.protocol, p.enabled AS provider_enabled FROM models m JOIN providers p ON p.id=m.provider_id WHERE m.id=? AND p.account_id=?', (model_id, account_id)).fetchone()
     if row is None:
         raise HTTPException(404, 'Model not found')
     return row
 
 def public_provider(row):
-    return {k: row[k] for k in ('id','name','base_url','enabled','proxy_mode')} | {'has_key': bool(row['credential']), 'protocol': 'openai_chat_completions'}
+    return {k: row[k] for k in ('id','name','base_url','enabled','proxy_mode','protocol')} | {'has_key': bool(row['credential'])}
 
 def public_model(row):
     return {k: row[k] for k in ('id','provider_id','model_id','display_name','supports_vision','timeout_seconds','max_output_tokens','enabled','image_transport')}
+
+@router.get('/api/ai/protocols')
+def supported_protocols():
+    return {'protocols': list(SUPPORTED_PROTOCOLS)}
 
 @router.get('/api/accounts/{account_id}/ai/providers')
 def providers(account_id: str = AccountDep):
@@ -134,7 +152,7 @@ def create_provider(body: Provider, account_id: str = AccountDep):
         raise HTTPException(422, 'API key required')
     pid = str(uuid.uuid4())
     with connection() as db:
-        db.execute('INSERT INTO providers VALUES (?,?,?,?,?,?,?)', (pid, account_id, body.name, body.base_url, protect(body.api_key.encode()), body.enabled, body.proxy_mode))
+        db.execute('INSERT INTO providers(id,account_id,name,base_url,credential,enabled,proxy_mode,protocol) VALUES (?,?,?,?,?,?,?,?)', (pid, account_id, body.name, body.base_url, protect(body.api_key.encode()), body.enabled, body.proxy_mode, body.protocol))
         return public_provider(provider(db, account_id, pid))
 
 @router.patch('/api/accounts/{account_id}/ai/providers/{provider_id}')
@@ -142,7 +160,8 @@ def update_provider(provider_id: str, body: Provider, account_id: str = AccountD
     with connection() as db:
         old = provider(db, account_id, provider_id)
         key = protect(body.api_key.encode()) if body.api_key else old['credential']
-        db.execute('UPDATE providers SET name=?,base_url=?,credential=?,enabled=?,proxy_mode=? WHERE id=?', (body.name, body.base_url, key, body.enabled, body.proxy_mode, provider_id))
+        protocol = body.protocol if 'protocol' in body.model_fields_set else old['protocol']
+        db.execute('UPDATE providers SET name=?,base_url=?,credential=?,enabled=?,proxy_mode=?,protocol=? WHERE id=?', (body.name, body.base_url, key, body.enabled, body.proxy_mode, protocol, provider_id))
         return public_provider(provider(db, account_id, provider_id))
 
 @router.delete('/api/accounts/{account_id}/ai/providers/{provider_id}')
@@ -211,21 +230,26 @@ def test_model(model_id: str, body: TestRequest, account_id: str = AccountDep):
         start = time.monotonic()
         code = None
         try:
+            if body.test_type == 'vision' and row['protocol'] == 'gemini_native' and row['image_transport'] != 'data_url':
+                raise ProtocolError('Gemini requires data_url image transport')
             key = protect(row['credential'], decrypt=True).decode()
-            content = 'Reply with the word OK.'
+            prompt = 'Reply with the word OK.'
+            image = None
             if body.test_type == 'vision':
-                content = [{'type': 'text', 'text': 'Identify the color of the circle and the digit. Reply with just the color and digit.'}, {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(test_image()).decode()}}]
+                prompt = 'Identify the color of the circle and the digit. Reply with just the color and digit.'
+                image = 'data:image/png;base64,' + base64.b64encode(test_image()).decode()
+            target, headers, payload = request_parts(row['protocol'], row['base_url'], row['model_id'], key, prompt, image, row['max_output_tokens'])
             with httpx.Client(timeout=body.timeout_seconds, trust_env=row['proxy_mode'] == 'system', follow_redirects=False) as client:
-                r = client.post(row['base_url'] + '/chat/completions', headers={'Authorization': 'Bearer ' + key}, json={'model': row['model_id'], 'messages': [{'role': 'user', 'content': content}], 'max_tokens': row['max_output_tokens']})
+                r = client.post(target, headers=headers, json=payload)
                 if r.status_code in (401, 403): code = 'AUTH_FAILED'
                 elif r.status_code == 404: code = 'MODEL_NOT_FOUND'
                 elif r.status_code == 429: code = 'RATE_LIMITED'
                 elif not 200 <= r.status_code < 300: code = 'PROVIDER_UNAVAILABLE'
                 else:
-                    data = r.json()
-                    answer = (data['choices'][0].get('message') or {}).get('content') if data.get('choices') else None
-                    if not isinstance(answer, str) or not answer.strip(): code = 'EMPTY_RESPONSE'
-                    elif body.test_type == 'vision' and not (('red' in answer.lower() or '红' in answer) and ('7' in answer or 'seven' in answer.lower() or '七' in answer)): code = 'IMAGE_UNSUPPORTED'
+                    answer = response_text(row['protocol'], r.json())
+                    if body.test_type == 'vision' and not (('red' in answer.lower() or '红' in answer) and ('7' in answer or 'seven' in answer.lower() or '七' in answer)): code = 'IMAGE_UNSUPPORTED'
+        except ProtocolError:
+            code = 'IMAGE_UNSUPPORTED' if body.test_type == 'vision' and row['protocol'] == 'gemini_native' and row['image_transport'] != 'data_url' else 'INVALID_RESPONSE_FORMAT'
         except httpx.TimeoutException: code = 'REQUEST_TIMEOUT'
         except (ValueError, KeyError, TypeError, IndexError): code = 'INVALID_RESPONSE_FORMAT'
         except Exception: code = 'PROVIDER_UNAVAILABLE'
@@ -273,13 +297,15 @@ def discover_models(provider_id: str, account_id: str = AccountDep):
     try:
         key = protect(row['credential'], decrypt=True).decode()
         with httpx.Client(timeout=15, trust_env=row['proxy_mode'] == 'system', follow_redirects=False) as client:
-            response = client.get(row['base_url'] + '/models', headers={'Authorization': 'Bearer ' + key})
+            response = client.get(row['base_url'] + '/models', headers=discovery_headers(row['protocol'], key))
         if response.status_code in (401, 403):
             raise HTTPException(502, 'AUTH_FAILED')
         if not 200 <= response.status_code < 300:
             raise HTTPException(502, 'PROVIDER_UNAVAILABLE')
-        data = response.json().get('data', [])
-        return {'models': [str(item['id']) for item in data if isinstance(item, dict) and isinstance(item.get('id'), str)][:500]}
+        data = response.json()
+        if row['protocol'] == 'gemini_native':
+            return {'models': [str(item['name']).removeprefix('models/') for item in data.get('models', []) if isinstance(item, dict) and isinstance(item.get('name'), str)][:500]}
+        return {'models': [str(item['id']) for item in data.get('data', []) if isinstance(item, dict) and isinstance(item.get('id'), str)][:500]}
     except HTTPException:
         raise
     except Exception:

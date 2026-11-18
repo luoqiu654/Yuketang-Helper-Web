@@ -10,3 +10,4 @@ certifi==2026.7.22
 pycryptodome==3.24.0
 platformdirs==4.12.4
 tzdata==2026.5; sys_platform == "win32"
+httpx==0.28.1

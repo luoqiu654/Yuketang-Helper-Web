@@ -7,6 +7,7 @@ import httpx
 from routers.ai_registry import connection, model, protect
 from image_fetch import as_data_url, fetch_image, ImageFetchError
 from config import get_ai_config
+from ai_protocols import request_parts, response_text, ProtocolError
 
 log = logging.getLogger(__name__)
 
@@ -69,13 +70,20 @@ def suggest(account_id: str, problem: dict) -> dict:
             response = client.models.generate_content(model=row['model_id'], contents=[types.Part.from_bytes(data=image_bytes, mime_type=mime), instruction])
             content = response.text
         else:
+            protocol = row.get('protocol', 'openai_chat_completions')
+            # legacy qwen speaks Chat Completions.
+            if protocol == 'qwen': protocol = 'openai_chat_completions'
+            try:
+                target, headers, payload = request_parts(protocol, row['base_url'], row['model_id'], key, instruction, url, row['max_output_tokens'])
+            except ProtocolError:
+                raise GatewayError('IMAGE_UNSUPPORTED') from None
             with httpx.Client(timeout=row['timeout_seconds'], trust_env=row['proxy_mode'] == 'system', follow_redirects=False) as client:
-                response = client.post(row['base_url'] + '/chat/completions', headers={'Authorization': 'Bearer ' + key}, json={'model': row['model_id'], 'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': instruction}, {'type': 'image_url', 'image_url': {'url': url}}]}], 'max_tokens': row['max_output_tokens']})
+                response = client.post(target, headers=headers, json=payload)
             if response.status_code in (401,403): raise GatewayError('AUTH_FAILED')
             if response.status_code == 404: raise GatewayError('MODEL_NOT_FOUND')
             if response.status_code == 429: raise GatewayError('RATE_LIMITED')
             if not 200 <= response.status_code < 300: raise GatewayError('PROVIDER_UNAVAILABLE')
-            content = response.json()['choices'][0]['message']['content']
+            content = response_text(protocol, response.json())
         if not isinstance(content, str) or not content.strip(): raise GatewayError('EMPTY_RESPONSE')
         if ptype == 5:
             answer = content.strip()

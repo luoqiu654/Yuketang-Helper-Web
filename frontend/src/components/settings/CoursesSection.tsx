@@ -13,12 +13,15 @@ import type {
 
 // The three notification "channels" share the same NotificationSub schema;
 // only the label and (for PushDeer) the gated-disabled rule differ.
+const EMPTY_NOTIFICATION: NotificationSub = { enabled: false, signin: true, problem: true, call: true, danmu: true, red_packet: true }
+
 const NOTIF_CHANNELS = [
   { field: 'notification', labelKey: 'settings.notification' },
   { field: 'voice_notification', labelKey: 'settings.voiceNotification' },
+  { field: 'windows_notification', labelKey: 'settings.windowsNotification' },
   { field: 'pushdeer_notification', labelKey: 'settings.pushdeerNotification' },
 ] as const satisfies ReadonlyArray<{
-  field: 'notification' | 'voice_notification' | 'pushdeer_notification'
+  field: 'notification' | 'voice_notification' | 'windows_notification' | 'pushdeer_notification'
   labelKey: string
 }>
 
@@ -192,6 +195,14 @@ export default function CoursesSection({
   const [saved, setSaved] = useState(() =>
     Object.fromEntries(courses.map((c) => [c.courseId, fingerprint(c)])),
   )
+  // Initially collapse disabled courses. Keep their in-progress edits mounted.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(courses.filter(c => !c.course_enabled).map(c => c.courseId)))
+  const toggleCollapsed = (id: string) => setCollapsed(prev => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
   type ApplyAll = { courseId: string; status: 'success' | 'error' }
   const [appliedAll, setAppliedAll] = useState<ApplyAll | null>(null)
 
@@ -222,6 +233,7 @@ export default function CoursesSection({
       })
       if (!resp.ok) throw new Error('Save failed')
       setSaved((prev) => ({ ...prev, [course.courseId]: fingerprint(course) }))
+      setCollapsed(prev => { const next = new Set(prev); if (course.course_enabled) next.delete(course.courseId); else next.add(course.courseId); return next })
       patchCourse(course.courseId, { saveStatus: 'saved' })
       setTimeout(() => patchCourse(course.courseId, { saveStatus: 'idle' }), 2000)
     } catch {
@@ -244,6 +256,7 @@ export default function CoursesSection({
     )
     const applied = courses.filter((_, i) => results[i])
     const appliedIds = new Set(applied.map((c) => c.courseId))
+    setCollapsed(prev => { const next = new Set(prev); for (const id of appliedIds) { if (payload.course_enabled) next.delete(id); else next.add(id) } return next })
     // A course that rejected the broadcast keeps its fields and is marked, so
     // the user can see which one(s) didn't take it.
     setCourses((prev) =>
@@ -278,6 +291,7 @@ export default function CoursesSection({
     <section className="settings-section">
       <h2 className="settings-section-title">{t('settings.title')}</h2>
 
+      {!defaults.windows_notification && <p role="status" className="settings-card-hint">{t('settings.windowsNotificationRestart')}</p>}
       {courses.length === 0 ? (
         <div className="card">
           <p className="empty-message">{t('settings.noCourses')}</p>
@@ -286,10 +300,16 @@ export default function CoursesSection({
         <div className="course-grid">
           {courses.map((course) => (
             <div key={course.courseId} className="course-card">
-              <div className="course-card-header">
+              <div className="course-card-header course-card-header--collapsible">
                 <h3 className="course-card-title"><MiddleTruncate text={course.name || course.courseId} /></h3>
+                {!course.course_enabled && <span className="badge badge-gray">{t('settings.courseDisabled')}</span>}
+                <button type="button" className="btn btn-sm btn-secondary" aria-expanded={!collapsed.has(course.courseId)}
+                  aria-controls={`course-settings-${course.courseId}`} onClick={() => toggleCollapsed(course.courseId)}>
+                  {collapsed.has(course.courseId) ? t('settings.expandCourse') : t('settings.collapseCourse')}
+                </button>
               </div>
 
+              <div id={`course-settings-${course.courseId}`} hidden={collapsed.has(course.courseId)}>
               <div className="course-card-body">
                 <div className="settings-group">
                   <div className="form-row">
@@ -385,10 +405,10 @@ export default function CoursesSection({
                     <NotificationSection
                       key={ch.field}
                       label={t(ch.labelKey)}
-                      value={course[ch.field]}
+                      value={course[ch.field] ?? EMPTY_NOTIFICATION}
                       onChange={(v) => updateField(course.courseId, ch.field, v)}
-                      disabled={ch.field === 'pushdeer_notification' && pushdeerKeyCount === 0}
-                      disabledTitle={ch.field === 'pushdeer_notification' ? t('settings.pushdeerNoKey') : undefined}
+                      disabled={(ch.field === 'pushdeer_notification' && pushdeerKeyCount === 0) || (ch.field === 'windows_notification' && !defaults.windows_notification)}
+                      disabledTitle={ch.field === 'pushdeer_notification' ? t('settings.pushdeerNoKey') : ch.field === 'windows_notification' && !defaults.windows_notification ? t('settings.windowsNotificationRestart') : undefined}
                     />
                   ))}
                 </div>
@@ -428,6 +448,7 @@ export default function CoursesSection({
                       ? t('settings.applied')
                       : t('settings.apply')}
                 </button>
+              </div>
               </div>
             </div>
           ))}
