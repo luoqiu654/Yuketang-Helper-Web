@@ -38,9 +38,11 @@ export default function QuizReview({ accountId }: { accountId: string }) {
       {q.options.length > 0 && <p>选项：{q.options.join('、')}</p>}
       {q.status === 'SUGGESTING' && <p>正在生成 AI 建议…</p>}
       {q.suggested_answer && <p>AI 建议：{Array.isArray(q.suggested_answer) ? q.suggested_answer.join('、') : q.suggested_answer} · {q.model_id} · {q.latency_ms} ms</p>}
-      {q.error_code && <p role="alert">AI 建议失败：{q.error_code}</p>}
+      {q.status === 'FAILED'
+        ? <p role="alert">自动提交的结果不明确，请先到雨课堂核实，助手不会自动重复提交。{q.error_code ? `（${q.error_code}）` : ''}</p>
+        : q.error_code && <p role="alert">AI 答题未完成，请先到雨课堂核实：{q.error_code}</p>}
       <label>答案草稿（选择题使用逗号分隔）<input className="form-input" value={answers[q.id] ?? (Array.isArray(q.suggested_answer) ? q.suggested_answer.join(',') : q.suggested_answer ?? '')} onChange={e => setAnswers({...answers, [q.id]: e.target.value})} /></label>
-      <p>目前无法可靠核验题目是否开放，助手提交功能暂停。请在雨课堂手动作答。</p>
+      <p>此处的答案草稿不会提交；如自动答题失败或结果不明确，请在雨课堂核实并手动作答。</p>
       <button className="btn btn-secondary" onClick={() => void dismiss(q)}>忽略</button>
       <button className="btn btn-secondary" onClick={() => setRefresh(refresh + 1)}>刷新</button>
     </article>)}

@@ -17,10 +17,12 @@ export default function PushdeerSection({
   pushdeer: PushdeerSettings
   onReload: () => Promise<void>
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [newKey, setNewKey] = useState(EMPTY_KEY)
+  const [addOpen, setAddOpen] = useState(() => pushdeer.keys.length === 0)
   const [adding, setAdding] = useState(false)
   const [addError, setAddError] = useState(false)
+  const [reloadError, setReloadError] = useState(false)
   const [tests, setTests] = useState<Record<number, TestState>>({})
 
   const setTest = (index: number, next: TestState) =>
@@ -30,6 +32,7 @@ export default function PushdeerSection({
     if (!newKey.name.trim() || !newKey.push_key.trim() || !newKey.endpoint.trim()) return
     setAdding(true)
     setAddError(false)
+    setReloadError(false)
     try {
       const resp = await fetch(`${base}/pushdeer/keys`, {
         method: 'POST',
@@ -42,12 +45,20 @@ export default function PushdeerSection({
       })
       if (!resp.ok) throw new Error('Add failed')
       setNewKey(EMPTY_KEY)
-      await onReload()
+      // The key has already been saved. Do not leave the old values available
+      // for a duplicate submission if only the following refresh fails.
+      setAddOpen(false)
+      try {
+        await onReload()
+      } catch {
+        setReloadError(true)
+      }
     } catch {
       setAddError(true)
       setTimeout(() => setAddError(false), 4000)
+    } finally {
+      setAdding(false)
     }
-    setAdding(false)
   }
 
   const handleDelete = async (index: number) => {
@@ -155,7 +166,20 @@ export default function PushdeerSection({
           </div>
         )}
 
-        <div className="credential-add-form">
+        <button
+          type="button"
+          className="btn btn-sm btn-secondary"
+          aria-expanded={addOpen}
+          aria-controls="pushdeer-add-form"
+          disabled={adding}
+          onClick={() => setAddOpen((open) => !open)}
+        >
+          {addOpen ? (i18n.language.startsWith('zh') ? '收起添加' : 'Close add form') : t('settings.addKey')}
+        </button>
+        {reloadError && <p role="alert" className="settings-card-hint">
+          {i18n.language.startsWith('zh') ? '密钥已保存，但列表刷新失败；请刷新页面查看。' : 'Key saved, but the list could not be refreshed. Reload this page to view it.'}
+        </p>}
+        {addOpen && <div id="pushdeer-add-form" className="credential-add-form">
           <div className="credential-add-fields">
             <input
               type="text"
@@ -190,8 +214,8 @@ export default function PushdeerSection({
                 ? t('settings.addKeyFailed')
                 : t('settings.addKey')}
           </button>
-        </div>
-        <p className="settings-card-hint">{t('settings.pushdeerEndpointHint')}</p>
+        </div>}
+        {addOpen && <p className="settings-card-hint">{t('settings.pushdeerEndpointHint')}</p>}
       </div>
     </section>
   )

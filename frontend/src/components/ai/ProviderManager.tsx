@@ -26,6 +26,7 @@ export default function ProviderManager({ base }: { base: string }) {
   const [models, setModels] = useState<Record<string, Model[]>>({})
   const [providerForm, setProviderForm] = useState<ProviderForm>(emptyProvider)
   const [providerEdit, setProviderEdit] = useState<string | null>(null)
+  const [providerFormOpen, setProviderFormOpen] = useState(false)
   const [modelForm, setModelForm] = useState<ModelForm>(emptyModel)
   const [modelProvider, setModelProvider] = useState<string | null>(null)
   const [modelEdit, setModelEdit] = useState<string | null>(null)
@@ -45,7 +46,7 @@ export default function ProviderManager({ base }: { base: string }) {
     setProviders(list)
     setModels(Object.fromEntries(entries))
   }, [base])
-  useEffect(() => { let active = true; setProviders([]); setModels({}); setProtocolCapabilityReady(false); request('/api/ai/protocols').then(data => { if (active && Array.isArray(data.protocols)) setSupportedProtocols(data.protocols) }).catch(() => { if (active) setSupportedProtocols(['openai_chat_completions']) }).finally(() => { if (active) setProtocolCapabilityReady(true) }); request(`${base}/ai/providers`).then(async (list: Provider[]) => {
+  useEffect(() => { let active = true; setProviders([]); setModels({}); setProviderEdit(null); setProviderForm(emptyProvider()); setProviderFormOpen(false); setModelProvider(null); setModelEdit(null); setModelForm(emptyModel()); setProtocolCapabilityReady(false); request('/api/ai/protocols').then(data => { if (active && Array.isArray(data.protocols)) setSupportedProtocols(data.protocols) }).catch(() => { if (active) setSupportedProtocols(['openai_chat_completions']) }).finally(() => { if (active) setProtocolCapabilityReady(true) }); request(`${base}/ai/providers`).then(async (list: Provider[]) => {
     const selection = await request(`${base}/ai/default`)
     if (active) setDefaultModel(selection.model_id)
     const entries = await Promise.all(list.map(async p => [p.id, await request(`${base}/ai/providers/${encodeURIComponent(p.id)}/models`) as Model[]] as const))
@@ -63,9 +64,9 @@ export default function ProviderManager({ base }: { base: string }) {
   const saveProvider = () => action(async () => {
     if (!protocolCapabilityReady || !supportedProtocols.includes(providerForm.protocol)) throw new Error(tr('请重启后端以使用该 API 格式', 'Restart the backend to use this API format'))
     await request(`${base}/ai/providers${providerEdit ? `/${encodeURIComponent(providerEdit)}` : ''}`, json(providerEdit ? 'PATCH' : 'POST', providerForm))
-    setProviderForm(emptyProvider()); setProviderEdit(null)
+    setProviderForm(emptyProvider()); setProviderEdit(null); setProviderFormOpen(false)
   })
-  const editProvider = (p: Provider) => { setProviderEdit(p.id); setProviderForm({ name: p.name, base_url: p.base_url, api_key: '', enabled: !!p.enabled, proxy_mode: p.proxy_mode, protocol: p.protocol ?? 'openai_chat_completions' }) }
+  const editProvider = (p: Provider) => { setProviderFormOpen(true); setProviderEdit(p.id); setProviderForm({ name: p.name, base_url: p.base_url, api_key: '', enabled: !!p.enabled, proxy_mode: p.proxy_mode, protocol: p.protocol ?? 'openai_chat_completions' }) }
   const saveModel = () => action(async () => {
     if (!modelProvider) return
     const url = modelEdit ? `${base}/ai/models/${encodeURIComponent(modelEdit)}` : `${base}/ai/providers/${encodeURIComponent(modelProvider)}/models`
@@ -85,7 +86,7 @@ export default function ProviderManager({ base }: { base: string }) {
   }
   return <div className="card provider-manager">
     <h3 className="provider-manager__title">{tr('自定义 AI 供应商', 'Custom AI providers')}</h3>
-    <p className="provider-manager__description">{tr('支持 OpenAI Chat Completions、OpenAI Responses、Gemini 和 Anthropic Messages 协议。模型可用于连接测试和课堂答案建议；当前版本尚不能提交答案。', 'Supports OpenAI Chat Completions, OpenAI Responses, Gemini and Anthropic Messages. Models can be tested and used for suggestions; submissions are unavailable in this version.')}</p>
+    <p className="provider-manager__description">{tr('支持 OpenAI Chat Completions、OpenAI Responses、Gemini 和 Anthropic Messages 协议。模型可用于测试、课堂答案建议及按课程启用的 AI 自动答题。', 'Supports OpenAI Chat Completions, OpenAI Responses, Gemini and Anthropic Messages. Models can be tested and used for suggestions or per-course AI auto-answer.')}</p>
     <p className="provider-manager__hint">{tr('基础地址需使用 HTTPS：OpenAI 和 Anthropic 通常以 /v1 结尾，Gemini 通常以 /v1beta 结尾。Gemini 图片使用 Data URL。', 'Use HTTPS: OpenAI and Anthropic typically end in /v1, Gemini in /v1beta. Gemini images use Data URL.')}</p>
     {protocolCapabilityReady && supportedProtocols.length === 1 && <p className="provider-manager__alert" role="status">{tr('当前后端尚未加载新的 API 格式，请重启开发版后再使用。', 'Restart the development backend to use the new API formats.')}</p>}{error && <p className="provider-manager__alert" role="alert">{error}</p>}{result && <p className="provider-manager__notice" role="status">{result}</p>}{discovery && <p className="provider-manager__notice" role="status">{discovery}</p>}
     {providers.map(p => <div key={p.id} className="credential-item provider-manager__provider">
@@ -106,7 +107,13 @@ export default function ProviderManager({ base }: { base: string }) {
           {(['connection', 'text', 'vision'] as const).map(type => <button key={type} className="btn btn-sm btn-secondary" disabled={busy || !m.enabled || !p.enabled} onClick={() => test(m, type)}>{type === 'connection' ? tr('连接测试', 'Connection') : type === 'text' ? tr('文本测试', 'Text') : tr('视觉测试', 'Vision')}</button>)}</div>
       </div>)}
     </div>)}
-    <h4 className="provider-manager__form-heading">{providerEdit ? tr('编辑供应商', 'Edit provider') : tr('添加供应商', 'Add provider')}</h4>
+    <div className="provider-manager__form-heading">
+      <button type="button" className="btn btn-sm btn-secondary" disabled={busy} aria-expanded={providerFormOpen} aria-controls="provider-form" onClick={() => {
+        if (providerFormOpen) { setProviderEdit(null); setProviderForm(emptyProvider()) }
+        setProviderFormOpen(!providerFormOpen)
+      }}>{providerFormOpen ? tr('收起供应商表单', 'Close provider form') : tr('添加供应商', 'Add provider')}</button>
+    </div>
+    {providerFormOpen && <div id="provider-form"><h4 className="provider-manager__active-heading">{providerEdit ? tr('编辑供应商', 'Edit provider') : tr('添加供应商', 'Add provider')}</h4>
     <div className="credential-add-fields provider-manager__fields">
       <label>{tr('名称', 'Name')}<input className="form-input" value={providerForm.name} onChange={e => setProviderForm({ ...providerForm, name: e.target.value })} /></label>
       <label>{tr('API 格式', 'API format')}<select className="form-select" value={providerForm.protocol} onChange={e => setProviderForm({ ...providerForm, protocol: e.target.value as Protocol })}><option value="openai_chat_completions">OpenAI Chat Completions</option><option disabled={!supportedProtocols.includes('openai_responses')} value="openai_responses">OpenAI Responses</option><option disabled={!supportedProtocols.includes('gemini_native')} value="gemini_native">Gemini Native</option><option disabled={!supportedProtocols.includes('anthropic_messages')} value="anthropic_messages">Anthropic Messages</option></select></label>
@@ -114,7 +121,7 @@ export default function ProviderManager({ base }: { base: string }) {
       <label>API Key<input className="form-input" type="password" autoComplete="new-password" value={providerForm.api_key} placeholder={providerEdit ? tr('留空保留现有密钥', 'Leave blank to keep existing key') : ''} onChange={e => setProviderForm({ ...providerForm, api_key: e.target.value })} /></label>
       <label>{tr('代理', 'Proxy')}<select className="form-select" value={providerForm.proxy_mode} onChange={e => setProviderForm({ ...providerForm, proxy_mode: e.target.value })}><option value="system">{tr('系统设置', 'System')}</option><option value="direct">{tr('直连', 'Direct')}</option></select></label>
     </div>
-    <div className="credential-actions"><button className="btn btn-primary" disabled={busy || !providerForm.name.trim() || !providerForm.base_url.trim() || (!providerEdit && !providerForm.api_key.trim())} onClick={() => void saveProvider()}>{tr('保存', 'Save')}</button>{providerEdit && <button className="btn btn-secondary" onClick={() => { setProviderEdit(null); setProviderForm(emptyProvider()) }}>{tr('取消', 'Cancel')}</button>}</div>
+    <div className="credential-actions"><button className="btn btn-primary" disabled={busy || !providerForm.name.trim() || !providerForm.base_url.trim() || (!providerEdit && !providerForm.api_key.trim())} onClick={() => void saveProvider()}>{tr('保存', 'Save')}</button><button className="btn btn-secondary" disabled={busy} onClick={() => { setProviderEdit(null); setProviderForm(emptyProvider()); setProviderFormOpen(false) }}>{tr('取消', 'Cancel')}</button></div></div>}
     {modelProvider && <><h4 className="provider-manager__form-heading">{modelEdit ? tr('编辑模型', 'Edit model') : tr('添加模型', 'Add model')}</h4><div className="credential-add-fields provider-manager__fields">
       <label>Model ID<input className="form-input" value={modelForm.model_id} onChange={e => setModelForm({ ...modelForm, model_id: e.target.value })} /></label>
       <label>{tr('显示名称', 'Display name')}<input className="form-input" value={modelForm.display_name} onChange={e => setModelForm({ ...modelForm, display_name: e.target.value })} /></label>

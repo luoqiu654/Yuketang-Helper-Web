@@ -1,5 +1,6 @@
 """Durable, account-scoped quiz review records."""
 import json
+import math
 from contextlib import contextmanager
 import sqlite3
 import time
@@ -29,9 +30,17 @@ def _public(row):
                 status=row['status'], revision=row['revision'], received_at=row['received_at'],
                 **json.loads(row['data']))
 
+def problem_deadline(problem, server_offset=0):
+    try:
+        limit, sent = float(problem.get('limit') or 0), float(problem.get('sendTime') or 0)
+        if not math.isfinite(limit) or not math.isfinite(sent) or limit <= 0 or sent <= 0:
+            return None
+        return sent / 1000 + limit - server_offset
+    except (TypeError, ValueError, OverflowError):
+        return None
+
 def create(account, lesson, problem):
-    limit, sent = problem.get('limit'), problem.get('sendTime')
-    deadline = float(sent) / 1000 + float(limit) if limit and sent and float(limit) > 0 else None
+    deadline = problem_deadline(problem)
     data = {'lesson': lesson.lessonname, 'classroom_id': str(lesson.classroomid),
             'problem_type': problem['problemType'], 'cover': problem.get('_cover', ''),
             'options': [str(x.get('key', '')) for x in problem.get('options', [])],
@@ -62,7 +71,7 @@ def transition(account, quiz_id, expected, status, updates=None):
         if not row or row['status'] not in expected:
             return False
         data = json.loads(row['data'])
-        if status in ('SUGGESTING', 'AWAITING_CONFIRMATION') and data.get('deadline_at') and data['deadline_at'] <= time.time():
+        if status in ('SUGGESTING', 'AWAITING_CONFIRMATION', 'SUBMITTING') and data.get('deadline_at') and data['deadline_at'] <= time.time():
             db.execute("UPDATE quizzes SET status='EXPIRED',revision=revision+1 WHERE id=? AND account_id=?", (quiz_id, account))
             return False
         data.update(updates or {})
@@ -73,22 +82,27 @@ def transition(account, quiz_id, expected, status, updates=None):
 def recover_interrupted():
     """An AI worker cannot survive a process restart."""
     with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
         db.execute("UPDATE quizzes SET status='NEEDS_MANUAL', revision=revision+1 WHERE status='SUGGESTING'")
         # A process may have stopped after the remote server accepted a POST.
         # Never retry it automatically when its outcome is unknown.
-        db.execute("UPDATE quizzes SET status='FAILED', revision=revision+1 WHERE status='SUBMITTING'")
+        for row in db.execute("SELECT id,data FROM quizzes WHERE status='SUBMITTING'").fetchall():
+            data = json.loads(row['data'])
+            data['error_code'] = 'SUBMISSION_UNKNOWN_CHECK_YUKETANG'
+            db.execute("UPDATE quizzes SET status='FAILED',data=?,revision=revision+1 WHERE id=? AND status='SUBMITTING'",
+                       (json.dumps(data, ensure_ascii=False), row['id']))
 
 def mark_answered(account, lesson_id, problem_id):
     row = get_by_problem(account, lesson_id, problem_id)
-    return bool(row and transition(account, row['id'], PENDING, 'ALREADY_ANSWERED'))
+    return bool(row and transition(account, row['id'], PENDING + ('FAILED',), 'ALREADY_ANSWERED'))
 
 def list_pending(account):
     with connect() as db:
-        rows = db.execute("SELECT * FROM quizzes WHERE account_id=? AND status IN ('RECEIVED','SUGGESTING','NEEDS_MANUAL','AWAITING_CONFIRMATION') ORDER BY received_at DESC", (account,)).fetchall()
+        rows = db.execute("SELECT * FROM quizzes WHERE account_id=? AND status IN ('RECEIVED','SUGGESTING','NEEDS_MANUAL','AWAITING_CONFIRMATION','FAILED') ORDER BY received_at DESC", (account,)).fetchall()
     result = []
     for row in rows:
         item = _public(row)
-        if item.get('deadline_at') and item['deadline_at'] <= time.time():
+        if item['status'] != 'FAILED' and item.get('deadline_at') and item['deadline_at'] <= time.time():
             transition(account, item['id'], PENDING, 'EXPIRED')
         else:
             result.append(item)
@@ -96,5 +110,5 @@ def list_pending(account):
 
 def dismiss(account, quiz_id, revision):
     with connect() as db:
-        cur = db.execute("UPDATE quizzes SET status='DISMISSED', revision=revision+1 WHERE id=? AND account_id=? AND revision=? AND status IN ('RECEIVED','SUGGESTING','NEEDS_MANUAL','AWAITING_CONFIRMATION')", (quiz_id, account, revision))
+        cur = db.execute("UPDATE quizzes SET status='DISMISSED', revision=revision+1 WHERE id=? AND account_id=? AND revision=? AND status IN ('RECEIVED','SUGGESTING','NEEDS_MANUAL','AWAITING_CONFIRMATION','FAILED')", (quiz_id, account, revision))
         return cur.rowcount == 1

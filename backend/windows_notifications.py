@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _EVENT_NAMES = {
     'signin': ('signin', '课堂签到状态更新'),
     'problem_received': ('problem', '收到课堂题目，请及时查看'),
-    'problem': ('problem', 'AI 建议失败，请在雨课堂手动作答'),
+    'problem': ('problem', 'AI 答题异常，请先到雨课堂核实'),
     'call': ('call', '课堂点名提醒'),
     'danmu': ('danmu', '课堂弹幕状态更新'),
     'red_packet': ('red_packet', '课堂红包状态更新'),

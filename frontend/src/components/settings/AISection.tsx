@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { AIKeyEntry, AISettings, AIProviderName } from '../../types'
 import MiddleTruncate from '../MiddleTruncate'
@@ -21,10 +21,14 @@ export default function AISection({
   ai: AISettings
   onReload: () => Promise<void>
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const zh = i18n.resolvedLanguage?.startsWith('zh') ?? true
   const [newKey, setNewKey] = useState(EMPTY_KEY)
   const [adding, setAdding] = useState(false)
+  const [addFormOpen, setAddFormOpen] = useState(false)
   const [addError, setAddError] = useState(false)
+
+  useEffect(() => { setNewKey(EMPTY_KEY); setAddFormOpen(false); setAddError(false) }, [base])
 
   const handleAdd = async () => {
     if (!newKey.name.trim() || !newKey.key.trim()) return
@@ -39,6 +43,7 @@ export default function AISection({
       if (!resp.ok) throw new Error('Add failed')
       setNewKey(EMPTY_KEY)
       await onReload()
+      setAddFormOpen(false)
     } catch {
       setAddError(true)
       setTimeout(() => setAddError(false), 4000)
@@ -108,7 +113,11 @@ export default function AISection({
           </div>
         )}
 
-        <div className="credential-add-form">
+        <button type="button" className="btn btn-sm btn-secondary" disabled={adding} aria-expanded={addFormOpen} aria-controls="legacy-ai-key-form" onClick={() => {
+          if (addFormOpen) { setNewKey(EMPTY_KEY); setAddError(false) }
+          setAddFormOpen(!addFormOpen)
+        }}>{addFormOpen ? (zh ? '收起密钥表单' : 'Close key form') : t('settings.addKey')}</button>
+        {addFormOpen && <div id="legacy-ai-key-form" className="credential-add-form">
           <div className="credential-add-fields">
             <input
               type="text"
@@ -145,7 +154,7 @@ export default function AISection({
                 ? t('settings.addKeyFailed')
                 : t('settings.addKey')}
           </button>
-        </div>
+        </div>}
         <p className="settings-card-hint">{t('common.betaWarning')}</p>
       </div>
       <ProviderManager key={base} base={base} />

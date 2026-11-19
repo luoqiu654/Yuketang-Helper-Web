@@ -55,7 +55,7 @@ MIN_POLL_INTERVAL = 10
 MAX_POLL_INTERVAL = 3600
 DEFAULT_POLL_INTERVAL = 30
 
-ChoiceAnswerMode = Literal["notify_only", "ai_suggest_confirm"]
+ChoiceAnswerMode = Literal["notify_only", "ai_suggest_confirm", "ai_auto"]
 ShortAnswerMode = ChoiceAnswerMode
 PushdeerLanguage = Literal["zh", "en"]
 AIProviderName = Literal["google", "qwen"]

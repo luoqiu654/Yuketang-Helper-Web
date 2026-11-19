@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import MiddleTruncate from '../MiddleTruncate'
 import Switch from '../Switch'
@@ -109,7 +109,7 @@ function QuizModeSelect<T extends string>({
 }: {
   label: string
   value: T
-  options: { value: T; label: string }[]
+  options: { value: T; label: string; disabled?: boolean }[]
   onChange: (v: T) => void
 }) {
   return (
@@ -117,61 +117,10 @@ function QuizModeSelect<T extends string>({
       <label className="form-label">{label}</label>
       <select className="form-select" value={value} onChange={(e) => onChange(e.target.value as T)}>
         {options.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
+          <option key={o.value} value={o.value} disabled={o.disabled}>{o.label}</option>
         ))}
       </select>
     </div>
-  )
-}
-
-// Full Cartesian product of (mode × answer_near_deadline × limit) with the resulting
-// submission behavior. Mirrors backend/lesson.py:_submit_window. Random and
-// Blank share identical timing logic, so they share a single "Fallback" row
-// group.
-const TIMING_ROWS: { mode: 'Ai' | 'Fallback'; nearDeadline: 'On' | 'Off'; limit: 'Limited' | 'Unlimited' }[] = [
-  { mode: 'Ai',       nearDeadline: 'On',  limit: 'Limited'   },
-  { mode: 'Ai',       nearDeadline: 'On',  limit: 'Unlimited' },
-  { mode: 'Ai',       nearDeadline: 'Off', limit: 'Limited'   },
-  { mode: 'Ai',       nearDeadline: 'Off', limit: 'Unlimited' },
-  { mode: 'Fallback', nearDeadline: 'On',  limit: 'Limited'   },
-  { mode: 'Fallback', nearDeadline: 'On',  limit: 'Unlimited' },
-  { mode: 'Fallback', nearDeadline: 'Off', limit: 'Limited'   },
-  { mode: 'Fallback', nearDeadline: 'Off', limit: 'Unlimited' },
-]
-
-function TimingTooltip() {
-  const { t } = useTranslation()
-  const k = (suffix: string) => `settings.answerNearDeadlineTable.${suffix}`
-  return (
-    <span className="tooltip-trigger">
-      ?
-      <div className="tooltip-table-popup" role="tooltip">
-        <div className="tooltip-table-title">{t(k('title'))}</div>
-        <table>
-          <thead>
-            <tr>
-              <th>{t(k('headerMode'))}</th>
-              <th>{t(k('headerNearDeadline'))}</th>
-              <th>{t(k('headerLimit'))}</th>
-              <th>{t(k('headerBehavior'))}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {TIMING_ROWS.map((r, i) => {
-              const behaviorKey = `${r.mode.toLowerCase()}${r.nearDeadline}${r.limit}` // e.g. aiOnLimited
-              return (
-                <tr key={i}>
-                  <td>{t(k(`mode${r.mode}`))}</td>
-                  <td>{t(k(`state${r.nearDeadline}`))}</td>
-                  <td>{t(k(`limit${r.limit === 'Limited' ? 'Yes' : 'No'}`))}</td>
-                  <td>{t(k(behaviorKey))}</td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      </div>
-    </span>
   )
 }
 
@@ -189,6 +138,16 @@ export default function CoursesSection({
   pushdeerKeyCount: number
 }) {
   const { t } = useTranslation()
+  const [autoCapability, setAutoCapability] = useState<'loading' | 'available' | 'unavailable'>('loading')
+  useEffect(() => {
+    const controller = new AbortController()
+    setAutoCapability('loading')
+    fetch('/api/quiz/capabilities', { signal: controller.signal })
+      .then(r => { if (!r.ok) throw new Error('capability unavailable'); return r.json() })
+      .then(data => setAutoCapability(Array.isArray(data.answer_modes) && data.answer_modes.includes('ai_auto') ? 'available' : 'unavailable'))
+      .catch(() => { if (!controller.signal.aborted) setAutoCapability('unavailable') })
+    return () => controller.abort()
+  }, [base])
   const [courses, setCourses] = useState(() => buildCourseStates(allCourses, settings, defaults))
   // Fingerprint of what the server holds for each course; Apply is offered
   // only while the card differs from it.
@@ -276,11 +235,12 @@ export default function CoursesSection({
     patchCourse(courseId, { ...defaults, saveStatus: 'idle' })
   }
 
-  const choiceModes: { value: ChoiceAnswerMode; label: string }[] = [
+  const choiceModes: { value: ChoiceAnswerMode; label: string; disabled?: boolean }[] = [
+    { value: 'ai_auto', label: t('settings.aiAuto'), disabled: autoCapability !== 'available' },
     { value: 'ai_suggest_confirm', label: t('settings.aiSuggestConfirm') },
     { value: 'notify_only', label: t('settings.notifyOnly') },
   ]
-  const shortAnswerModes: { value: ShortAnswerMode; label: string }[] = choiceModes
+  const shortAnswerModes: { value: ShortAnswerMode; label: string; disabled?: boolean }[] = choiceModes
 
   const saveButtonClass = (s: CourseState['saveStatus']) =>
     s === 'saved' ? 'btn-success'
@@ -327,6 +287,8 @@ export default function CoursesSection({
 
                 <div className="settings-group">
                   <span className="settings-group-label">{t('settings.quizModes')}</span>
+                  {autoCapability === 'unavailable' && <p role="status" className="settings-card-hint">{t('settings.aiAutoRestart')}</p>}
+                  {([course.type1, course.type2, course.type3, course.type5].includes('ai_auto')) && <p className="settings-card-hint">{t('settings.aiAutoNotice')}</p>}
                   {([1, 2, 3] as const).map((n) => {
                     const field = `type${n}` as const
                     return (
@@ -355,7 +317,7 @@ export default function CoursesSection({
                   <div className="form-row">
                     <label className="form-label">
                       {t('settings.answerNearDeadline')}
-                      <TimingTooltip />
+                      <span className="tooltip-trigger" data-tooltip={t('settings.answerNearDeadlineDesc')}>?</span>
                     </label>
                     <Switch
                       label={t('settings.answerNearDeadline')}

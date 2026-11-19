@@ -6,12 +6,14 @@ import Dashboard from './pages/Dashboard'
 import Settings from './pages/Settings'
 import { AccountsProvider, useAccounts } from './hooks/useAccounts'
 import AccountSwitcher from './components/AccountSwitcher'
+import { changeAppLanguage } from './i18n'
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
   isActive ? 'nav-link active' : 'nav-link'
 
 const REPO_URL = 'https://github.com/luoqiu654/Yuketang-Helper-Web'
 const VERSION = import.meta.env.VITE_APP_VERSION
+const DESKTOP_BUILD = import.meta.env.VITE_DESKTOP_BUILD === '1'
 
 function Loading() {
   const { t } = useTranslation()
@@ -31,7 +33,7 @@ function AppInner() {
 
   const toggleLanguage = () => {
     const next = i18n.language.startsWith('zh') ? 'en' : 'zh'
-    i18n.changeLanguage(next)
+    changeAppLanguage(next)
   }
 
   const hasAuthedAccount = !!activeAccount?.logged_in
@@ -115,7 +117,7 @@ function AppInner() {
           </svg>
           <span>luoqiu654/Yuketang-Helper-Web</span>
         </a>
-        {VERSION ? (
+        {VERSION && !DESKTOP_BUILD ? (
           <a
             className="app-footer-version"
             href={`${REPO_URL}/releases/tag/${VERSION}`}
@@ -125,7 +127,7 @@ function AppInner() {
             {VERSION}
           </a>
         ) : (
-          <span className="app-footer-version">dev</span>
+          <span className="app-footer-version">{VERSION || 'dev'}</span>
         )}
       </footer>
     </div>

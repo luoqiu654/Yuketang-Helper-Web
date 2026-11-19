@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import random
 import threading
 import time
@@ -98,6 +99,10 @@ class Lesson:
         # `unlockedproblem` when we couldn't even resolve which problem it is.
         self._failures: dict[Any, int] = {}
         self._answered_lock = threading.Lock()
+        # A recent server event is required in addition to a fresh result fetch.
+        # It cannot prove the teacher has not closed the question in the interim.
+        self._unlocked_lock = threading.Lock()
+        self._unlocked_seen: dict[str, float] = {}
         # problemIds we've told the user we won't answer, so each gets one notice.
         self._skip_notified: set = set()
         # Seconds to add to the local clock to get Yuketang's. Only ever moves
@@ -268,21 +273,27 @@ class Lesson:
     # Problem bookkeeping
     # ------------------------------------------------------------------
 
-    def _fetch_presentation(self, presentation_id: Any, attempts: int = _ANSWER_ATTEMPTS, timeout: int = 4) -> None:
+    def _fetch_presentation(self, presentation_id: Any, attempts: int = _ANSWER_ATTEMPTS, timeout: int = 4) -> dict:
         """(Re-)load a presentation's problems into `_problems`. Always re-reads:
         one cheap GET refreshes each problem's `result`, which is how we know a
         problem was answered elsewhere and must not be overwritten."""
         r = http_request("GET", api_url(self.domain, URL_PRESENTATION_FETCH, presentation_id=presentation_id),
                          headers=self.headers, attempts=attempts, timeout=timeout)
-        for slide in r.json()["data"].get("slides", []):
+        payload = r.json()
+        if not 200 <= getattr(r, 'status_code', 200) < 300 or payload.get('code', 0) != 0:
+            raise ValueError('presentation unavailable')
+        observed = {}
+        for slide in payload["data"].get("slides", []):
             problem = slide.get("problem")
             if not problem:
                 continue
             problem["_cover"] = slide.get("cover", "")
             problem["_pres"] = presentation_id
+            observed[problem['problemId']] = dict(problem)
             self._problems[problem["problemId"]] = problem
             if slide.get("id"):
                 self._problems[slide["id"]] = problem
+        return observed
 
     def _load_presentations(self, presentation_ids: Iterable) -> None:
         """Fetch each presentation independently so one failure doesn't hide
@@ -306,6 +317,15 @@ class Lesson:
 
     def _mode_for(self, problem: dict) -> str:
         return self.course_config.get(f"type{problem['problemType']}", "off")
+
+    def _remember_unlocked(self, problem_id: Any) -> None:
+        with self._unlocked_lock:
+            self._unlocked_seen[str(problem_id)] = time.monotonic()
+
+    def _recently_unlocked(self, problem_id: Any) -> bool:
+        with self._unlocked_lock:
+            seen = self._unlocked_seen.get(str(problem_id))
+        return seen is not None and time.monotonic() - seen <= 30
 
     def _skip_reason(self, problem: dict) -> str | None:
         if problem["problemType"] not in (1, 2, 3, 5):
@@ -334,11 +354,11 @@ class Lesson:
     def _remaining_limit(self, problem: dict) -> int:
         """Seconds left on a problem's own clock, from the presentation data.
         0 means "no deadline known" — submit without holding."""
-        limit = int(problem.get("limit") or 0)
-        sent_ms = int(float(problem.get("sendTime") or 0))
-        if limit <= 0 or sent_ms <= 0:
+        from quiz.store import problem_deadline
+        deadline = problem_deadline(problem, self._server_offset)
+        if deadline is None:
             return 0
-        return max(0, int(sent_ms / 1000 + limit - (time.time() + self._server_offset)))
+        return max(0, int(deadline - time.time()))
 
     def _claim(self, problemid: Any) -> bool:
         """Take ownership of answering a problem. False means it's already
@@ -349,7 +369,7 @@ class Lesson:
             self._answered.add(problemid)
             return True
 
-    def _answer_if_needed(self, problem: dict | None, limit: int, context: str) -> None:
+    def _answer_if_needed(self, problem: dict | None, limit: int, context: str, observed_at: float | None = None) -> None:
         """The one way in to answering: both the live `unlockproblem` frame and
         the reconcile pass go through here, so the guards can't be bypassed."""
         if problem is None:
@@ -373,10 +393,16 @@ class Lesson:
             if store.create(self.account_id, self, problem):
                 self.on_event("problem_received", {"lesson": self.lessonname,
                     "lessonid": self.lessonid, "problemid": problemid})
-                if self._mode_for(problem) == "ai_suggest_confirm":
+                if self._mode_for(problem) in ("ai_suggest_confirm", "ai_auto"):
                     record = store.get_by_problem(self.account_id, self.lessonid, problemid)
                     if record and store.transition(self.account_id, record['id'], ('NEEDS_MANUAL',), 'SUGGESTING'):
-                        threading.Thread(target=self._suggest_problem, args=(record['id'], dict(problem)), daemon=True).start()
+                        deadline = record.get('deadline_at')
+                        if deadline:
+                            deadline -= self._server_offset
+                        if limit >= 0:
+                            observed = (observed_at if observed_at is not None else time.time()) + limit
+                            deadline = min(deadline, observed) if deadline else observed
+                        threading.Thread(target=self._suggest_problem, args=(record['id'], dict(problem), deadline), daemon=True).start()
         except Exception:
             logger.exception("Could not persist quiz; submission remains disabled")
             # Notifications remain available even if the local quiz database fails.
@@ -385,13 +411,16 @@ class Lesson:
                 self.on_event("problem_received", {"lesson": self.lessonname,
                     "lessonid": self.lessonid, "problemid": problemid})
 
-    def _suggest_problem(self, quiz_id: str, problem: dict) -> None:
+    def _suggest_problem(self, quiz_id: str, problem: dict, deadline: float | None = None) -> None:
         from quiz import store
         from quiz.validation import validate_answer
         try:
             from ai_gateway import suggest
             result = suggest(self.account_id, problem)
             answer = validate_answer(problem, result['answer'])
+            if self._mode_for(problem) == 'ai_auto':
+                self._auto_submit(quiz_id, problem, answer, result, deadline)
+                return
             changed = store.transition(self.account_id, quiz_id, ('SUGGESTING',), 'AWAITING_CONFIRMATION', {
                 'suggested_answer': answer, 'model_id': result.get('model_id'),
                 'provider_id': result.get('provider_id'), 'latency_ms': result.get('latency_ms'),
@@ -404,6 +433,98 @@ class Lesson:
                 code = 'AI_UNAVAILABLE'
             if store.transition(self.account_id, quiz_id, ('SUGGESTING',), 'NEEDS_MANUAL', {'error_code': code}):
                 self._emit_ai_failed(problem['problemId'], problem['problemType'], code)
+
+    def _auto_submit(self, quiz_id: str, problem: dict, answer: Any, result: dict, deadline: float | None) -> None:
+        """Attempt one opt-in AI submission; unknown outcomes are never retried."""
+        from quiz import store
+        pid, kind = problem['problemId'], problem['problemType']
+
+        def fail(code: str, state: str = 'NEEDS_MANUAL', expected=('SUGGESTING',)) -> None:
+            if store.transition(self.account_id, quiz_id, expected, state, {'error_code': code}):
+                self._emit_ai_failed(pid, kind, code)
+
+        def allowed() -> bool:
+            return (self._is_running() and self.course_config.get('course_enabled', True)
+                    and self._mode_for(problem) == 'ai_auto' and self._recently_unlocked(pid))
+
+        if not allowed():
+            fail('AUTO_OPEN_UNVERIFIED')
+            return
+        # Honour the existing near-deadline option only for a known deadline.
+        if deadline and self.course_config.get('answer_near_deadline', False):
+            hold_until = deadline - random.uniform(*_DEADLINE_LEAD)
+            delay = max(0.0, hold_until - time.time())
+            while delay > 0:
+                if not allowed():
+                    fail('AUTO_OPEN_UNVERIFIED')
+                    return
+                self._stop_event.wait(min(delay, 1.0))
+                delay = max(0.0, hold_until - time.time())
+        if deadline and deadline <= time.time():
+            fail('AUTO_EXPIRED', 'EXPIRED')
+            return
+        # No cached fallback: a fresh presentation must prove unanswered.
+        try:
+            if not problem.get('_pres'):
+                raise ValueError('missing presentation')
+            observed = self._fetch_presentation(problem['_pres'], attempts=1, timeout=_ANSWER_TIMEOUT)
+            fresh = observed.get(pid)
+            if pid not in observed or not fresh or 'result' not in fresh:
+                raise ValueError('missing result')
+        except Exception:
+            fail('AUTO_REFRESH_FAILED')
+            return
+        if fresh['result'] is not None:
+            store.transition(self.account_id, quiz_id, ('SUGGESTING',), 'ALREADY_ANSWERED')
+            return
+        try:
+            from quiz.validation import validate_answer
+            revised_deadline = store.problem_deadline(fresh, self._server_offset)
+            if revised_deadline is not None:
+                deadline = min(deadline, revised_deadline) if deadline else revised_deadline
+            if (fresh.get('problemType') != kind or fresh.get('options', []) != problem.get('options', [])
+                    or fresh.get('_cover', '') != problem.get('_cover', '')):
+                raise ValueError('question changed')
+            validate_answer(fresh, answer)
+        except (ValueError, KeyError, TypeError):
+            fail('AUTO_QUESTION_CHANGED')
+            return
+        if not allowed():
+            fail('AUTO_OPEN_UNVERIFIED')
+            return
+        if deadline and deadline <= time.time():
+            fail('AUTO_EXPIRED', 'EXPIRED')
+            return
+        updates = {'suggested_answer': answer, 'model_id': result.get('model_id'),
+                   'provider_id': result.get('provider_id'), 'latency_ms': result.get('latency_ms'),
+                   'final_answer': answer, 'error_code': None, 'submission_source': 'ai_auto'}
+        if deadline:
+            updates['deadline_at'] = deadline
+        if not store.transition(self.account_id, quiz_id, ('SUGGESTING',), 'SUBMITTING', updates):
+            return
+        # A changed mode or classroom event after claiming must still stop the POST.
+        if not allowed():
+            fail('AUTO_OPEN_UNVERIFIED', expected=('SUBMITTING',))
+            return
+        if deadline and deadline <= time.time():
+            fail('AUTO_EXPIRED', 'EXPIRED', expected=('SUBMITTING',))
+            return
+        payload_answer = {'content': answer, 'pics': [{'pic': '', 'thumb': ''}]} if kind == 5 else answer
+        payload = {'problemId': pid, 'problemType': kind, 'dt': int((time.time() + self._server_offset) * 1000), 'result': payload_answer}
+        try:
+            response = http_request('POST', api_url(self.domain, URL_PROBLEM_ANSWER), headers=self.headers,
+                                    json=payload, attempts=1, timeout=_ANSWER_TIMEOUT, allow_redirects=False)
+            body = response.json()
+            success = 200 <= response.status_code < 300 and isinstance(body, dict) and body.get('code') == 0
+        except Exception:
+            success = False
+        if not success:
+            fail('AUTO_SUBMISSION_UNKNOWN_CHECK_YUKETANG', 'FAILED', expected=('SUBMITTING',))
+            return
+        if store.transition(self.account_id, quiz_id, ('SUBMITTING',), 'SUBMITTED', {'submitted_at': time.time()}):
+            self.on_event('problem', {'lesson': self.lessonname, 'lessonid': self.lessonid,
+                'problemid': pid, 'problemtype': kind, 'answers': answer, 'source': 'ai_auto',
+                'status': 'success', 'message': ''})
 
     def _reconcile_unlocked(self, data: dict) -> None:
         """Answer anything the server reports as unlocked that we haven't.
@@ -426,9 +547,12 @@ class Lesson:
             problem = self._problems.get(raw_id)
             if problem is None:
                 self._failures[raw_id] = self._failures.get(raw_id, 0) + 1
+            else:
+                self._remember_unlocked(problem['problemId'])
+            from quiz.store import problem_deadline
             self._answer_if_needed(
                 problem,
-                self._remaining_limit(problem) if problem else 0,
+                self._remaining_limit(problem) if problem and problem_deadline(problem) is not None else -1,
                 context=f"unlocked {raw_id}",
             )
 
@@ -498,8 +622,20 @@ class Lesson:
             logger.exception(f"[{self.account_id}][WS {self.lessonname}] frame handling failed")
 
     def _dispatch(self, data: dict) -> None:
+        frame_received_at = time.time()
         op = data.get("op", "")
         logger.info(f"[{self.account_id}][WS {self.lessonname}] op={op}")
+
+        if isinstance(data.get('unlockedproblem'), list):
+            now = time.monotonic()
+            visible = {}
+            for raw in data['unlockedproblem']:
+                visible[str(raw)] = now
+                known = self._problems.get(raw)
+                if known:
+                    visible[str(known['problemId'])] = now
+            with self._unlocked_lock:
+                self._unlocked_seen = visible
 
         # Frames carry server timestamps; keep the clock offset current.
         problem_ref = data.get("problem")
@@ -528,7 +664,11 @@ class Lesson:
                 # than dropping the problem.
                 self._load_presentations({problem_ref.get("pres"), data.get("presentation")})
                 problem = self._problems.get(raw_id) or self._problems.get(problem_ref.get("sid"))
-            self._answer_if_needed(problem, problem_ref.get("limit", -1) - 1, context=f"unlockproblem {raw_id}")
+            if problem is not None and ('unlockedproblem' not in data or raw_id in (data.get('unlockedproblem') or []) or problem_ref.get('sid') in (data.get('unlockedproblem') or [])):
+                self._remember_unlocked(problem['problemId'])
+            frame_limit = problem_ref.get('limit')
+            remaining = max(0, frame_limit - 1) if isinstance(frame_limit, (int, float)) and math.isfinite(frame_limit) and frame_limit > 0 else -1
+            self._answer_if_needed(problem, remaining, context=f"unlockproblem {raw_id}", observed_at=frame_received_at)
 
         elif op == "lessonfinished":
             self._stop(_Stop.FINISHED)

@@ -39,3 +39,5 @@ dist/
 .hallmark/
 V0.2迭代.md
 config.json
+.venv-desktop/
+desktop-builds/

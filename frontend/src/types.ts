@@ -1,7 +1,7 @@
 export type Language = 'zh' | 'en'
 
-export type ChoiceAnswerMode = 'ai_suggest_confirm' | 'notify_only'
-export type ShortAnswerMode = 'ai_suggest_confirm' | 'notify_only'
+export type ChoiceAnswerMode = 'ai_auto' | 'ai_suggest_confirm' | 'notify_only'
+export type ShortAnswerMode = ChoiceAnswerMode
 export type AIProviderName = 'google' | 'qwen'
 
 export interface NotificationSub {

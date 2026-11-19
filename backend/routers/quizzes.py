@@ -5,6 +5,10 @@ from quiz import store
 
 router = APIRouter()
 
+@router.get('/api/quiz/capabilities')
+def capabilities():
+    return {'answer_modes': ['notify_only', 'ai_suggest_confirm', 'ai_auto']}
+
 class Revision(BaseModel):
     expected_revision: int
 
